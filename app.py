@@ -1,6 +1,6 @@
 import requests
 from playwright.sync_api import sync_playwright
-from playwright_stealth.sync import stealth_sync # '투명 망토'를 올바른 경로에서 불러옵니다.
+from playwright_stealth import stealth_sync # playwright-stealth==1.0.6 버전에 맞는 import
 import json
 import os
 from datetime import datetime
@@ -14,14 +14,13 @@ def scrape_oliveyoung_rankings():
             )
             page = context.new_page()
 
-            # 브라우저에 '투명 망토'를 올바른 방식으로 적용합니다.
+            # '투명 망토' 적용
             stealth_sync(page)
 
             print("Navigating to Olive Young main page with STEALTH mode...")
             page.goto("https://www.oliveyoung.co.kr/store/main/main.do", timeout=120000)
             
             print("Waiting for the page to pass security checks...")
-            # 페이지의 제목이 'OLIVEYOUNG'으로 바뀔 때까지 기다립니다.
             page.wait_for_function("document.title.includes('OLIVEYOUNG')", timeout=120000)
             print("Security check passed. Page is ready.")
 
@@ -72,7 +71,7 @@ def send_to_slack(message_lines, is_error=False):
         print(f"❌ Failed to send Slack message: {e}")
 
 if __name__ == "__main__":
-    print("🔍 올리브영 랭킹 수집 시작 (Playwright + STEALTH 최종 모드)")
+    print("🔍 올리브영 랭킹 수집 시작 (Playwright + STEALTH v1.0.6 최종 모드)")
     rankings = scrape_oliveyoung_rankings()
 
     if rankings:
