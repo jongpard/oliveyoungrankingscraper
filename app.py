@@ -1,80 +1,79 @@
 import requests
-from bs4 import BeautifulSoup
-import json
+import pandas as pd
 import os
 from datetime import datetime
 
-def scrape_oliveyoung_rankings():
-    api_key = os.getenv("SCRAPER_API_KEY")
-    # 이제 데이터 API가 아닌, 사람이 보는 실제 랭킹 페이지 주소를 목표로 합니다.
-    target_url = "https://www.oliveyoung.co.kr/store/ranking/getBestList.do"
-
-    # '만능 열쇠'(&render=true)를 사용하여, ScraperAPI가 JS를 모두 실행하고 최종 HTML을 가져오도록 합니다.
-    scraperapi_url = f'http://api.scraperapi.com?api_key={api_key}&url={target_url}&render=true'
-
-    print("Sending request via ScraperAPI with Browser Rendering enabled...")
-    response = requests.get(scraperapi_url, timeout=180) # 렌더링을 위해 타임아웃을 3분으로 넉넉하게 설정
-
-    if response.status_code != 200:
-        print(f"❌ ScraperAPI failed with status code: {response.status_code}")
-        print(response.text)
-        return None
-
-    try:
-        # 이제 JSON이 아닌, 최종 결과물인 HTML을 분석합니다.
-        soup = BeautifulSoup(response.text, 'html.parser')
-        
-        # 랭킹 리스트의 각 아이템을 선택합니다.
-        product_list = soup.select('#rank-best-list .prd_item')
-        
-        if not product_list:
-            raise ValueError("Could not find the product list. The page structure might have changed.")
-
-        top_products = []
-        for item in product_list[:100]: # 100위까지만 가져옵니다.
-            rank = item.select_one('.prd_rank > em').text.strip()
-            brand = item.select_one('.prd_brand').text.strip()
-            name = item.select_one('.prd_name').text.strip()
-            top_products.append(f"{rank}. [{brand}] {name}")
-            
-        return top_products
-
-    except Exception as e:
-        print(f"❌ An error occurred during parsing: {e}")
-        print("Response from server was (first 500 chars):")
-        print(response.text[:500])
-        return None
-
-def send_to_slack(message_lines, is_error=False):
-    webhook_url = os.getenv("SLACK_WEBHOOK_URL")
-    if not webhook_url: return
-
-    text = f"🚨 올리브영 랭킹 수집 실패" if is_error else f"🏆 올리브영 랭킹 Top {len(message_lines[:10])}"
+def fetch_oliveyoung_rankings():
+    """
+    올리브영의 실시간 랭킹 API를 직접 호출하여 데이터를 가져옵니다.
+    """
+    # 다른 개발자들의 성공 사례에서 발견한 실제 API 엔드포인트
+    url = "https://m.oliveyoung.co.kr/m/mc/main/getRankAll.do"
     
-    blocks = [
-        {"type": "section", "text": {"type": "mrkdwn", "text": f"*{text}*"}},
-        {"type": "divider"},
-    ]
-    if not is_error and message_lines:
-        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": "\n".join(message_lines[:10])}})
-    elif is_error and message_lines:
-         blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": message_lines[0]}})
-
-    blocks.append({"type": "context", "elements": [{"type": "mrkdwn", "text": f"🕒 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"}]})
+    print("📥 올리브영 랭킹 크롤링 시작")
+    response = requests.get(url)
+    
+    if response.status_code != 200:
+        print(f"❌ 요청 실패: 상태 코드 {response.status_code}")
+        return None
 
     try:
-        requests.post(webhook_url, json={"text": text, "blocks": blocks}, timeout=10).raise_for_status()
-        print("✅ Slack message sent successfully")
+        # 이 API는 HTML이 아닌 순수한 JSON 데이터를 반환합니다.
+        items = response.json().get("bestList", [])
+        if not items:
+            print("❌ 응답에서 'bestList'를 찾을 수 없습니다.")
+            return None
+        
+        # 데이터를 DataFrame으로 변환하여 처리
+        df = pd.DataFrame(items)
+        df['rank'] = df['rnk'].astype(int)
+        df['brand'] = df['brnd_nm']
+        df['name'] = df['prdt_nm']
+        df = df.sort_values('rank').reset_index(drop=True)
+        
+        return df
+
     except Exception as e:
-        print(f"❌ Failed to send Slack message: {e}")
+        print(f"❌ 데이터 처리 중 에러 발생: {e}")
+        print("서버 응답 (첫 500자):", response.text[:500])
+        return None
+
+def send_to_slack(df):
+    """
+    결과를 Slack으로 전송합니다.
+    """
+    webhook_url = os.getenv("SLACK_WEBHOOK_URL")
+    if not webhook_url:
+        print("⚠️ SLACK_WEBHOOK_URL이 설정되지 않았습니다.")
+        return
+
+    # 슬랙 메시지로 보낼 텍스트 생성 (상위 10개)
+    top_10_list = []
+    for index, row in df.head(10).iterrows():
+        top_10_list.append(f"{row['rank']}. [{row['brand']}] {row['name']}")
+    
+    message_text = "\n".join(top_10_list)
+    title = f"🏆 올리브영 실시간 랭킹 Top {len(top_10_list)}"
+
+    blocks = [
+        {"type": "section", "text": {"type": "mrkdwn", "text": f"*{title}*"}},
+        {"type": "divider"},
+        {"type": "section", "text": {"type": "mrkdwn", "text": message_text}},
+        {"type": "context", "elements": [{"type": "mrkdwn", "text": f"🕒 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"}]}
+    ]
+
+    try:
+        response = requests.post(webhook_url, json={"text": title, "blocks": blocks}, timeout=10)
+        response.raise_for_status()
+        print("✅ 슬랙 메시지 전송 성공")
+    except Exception as e:
+        print(f"❌ 슬랙 메시지 전송 실패: {e}")
 
 if __name__ == "__main__":
-    print("🔍 올리브영 랭킹 수집 시작 (ScraperAPI + HTML Parsing 최종 모드)")
-    rankings = scrape_oliveyoung_rankings()
-
-    if rankings:
-        print(f"✅ Successfully scraped {len(rankings)} items.")
-        send_to_slack(rankings)
+    df = fetch_oliveyoung_rankings()
+    if df is not None and not df.empty:
+        print(f"✅ {len(df)}개 상품 크롤링 성공")
+        send_to_slack(df)
     else:
-        print("❌ Scraping failed.")
-        send_to_slack(["ScraperAPI를 통한 요청 또는 HTML 분석에 실패했습니다."], is_error=True)
+        print("🔴 최종 실패")
+        # 실패 시에는 별도의 알림을 보내지 않거나, 실패 알림을 보낼 수 있습니다.
