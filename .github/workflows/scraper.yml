@@ -1,5 +1,3 @@
-# .github/workflows/scraper.yml 파일의 전체 내용
-
 name: Run OliveYoung Scraper
 
 on:
@@ -25,6 +23,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
       
+      # 이 부분이 추가되어야 합니다!
       - name: Install Playwright Browsers
         run: playwright install chromium
 
