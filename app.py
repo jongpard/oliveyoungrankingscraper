@@ -5,20 +5,32 @@ from datetime import datetime
 
 def fetch_oliveyoung_rankings():
     """
-    올리브영의 실시간 랭킹 API를 직접 호출하여 데이터를 가져옵니다.
+    올리브영의 모바일 실시간 랭킹 API를 직접 호출하여 데이터를 가져옵니다.
+    이것이 현재 다른 개발자들이 성공적으로 사용하는 방식입니다.
     """
-    # 다른 개발자들의 성공 사례에서 발견한 실제 API 엔드포인트
+    # 다른 개발자들의 성공 사례에서 발견한 '숨겨진' 모바일 API 엔드포인트
     url = "https://m.oliveyoung.co.kr/m/mc/main/getRankAll.do"
     
-    print("📥 올리브영 랭킹 크롤링 시작")
-    response = requests.get(url)
-    
-    if response.status_code != 200:
-        print(f"❌ 요청 실패: 상태 코드 {response.status_code}")
-        return None
+    # 모바일 앱인 것처럼 위장하기 위한 헤더
+    headers = {
+        'User-Agent': 'OliveYoungApp/7.2.1 (iOS; 15.4.1; iPhone)',
+        'Content-Type': 'application/json;charset=UTF-8'
+    }
 
+    # API가 요구하는 '주문서' (카테고리 번호가 핵심)
+    payload = {
+        "dispCatNo": "90000010001", # 실시간 랭킹 전체 카테고리
+        "pageIdx": "1",
+        "rowsPerPage": "100"
+    }
+
+    print("📥 올리브영 랭킹 크롤링 시작 (모바일 API 직접 호출 방식)")
+    
     try:
-        # 이 API는 HTML이 아닌 순수한 JSON 데이터를 반환합니다.
+        # GET이 아닌 POST 방식으로, '주문서(payload)'를 JSON 형태로 전송
+        response = requests.post(url, headers=headers, json=payload, timeout=30)
+        response.raise_for_status() # 요청이 실패하면 여기서 에러 발생
+
         items = response.json().get("bestList", [])
         if not items:
             print("❌ 응답에서 'bestList'를 찾을 수 없습니다.")
@@ -29,13 +41,16 @@ def fetch_oliveyoung_rankings():
         df['rank'] = df['rnk'].astype(int)
         df['brand'] = df['brnd_nm']
         df['name'] = df['prdt_nm']
-        df = df.sort_values('rank').reset_index(drop=True)
+        df = df[['rank', 'brand', 'name']].sort_values('rank').reset_index(drop=True)
         
         return df
 
+    except requests.exceptions.HTTPError as e:
+        print(f"❌ HTTP 요청 실패: {e.response.status_code}")
+        print("서버 응답:", e.response.text)
+        return None
     except Exception as e:
         print(f"❌ 데이터 처리 중 에러 발생: {e}")
-        print("서버 응답 (첫 500자):", response.text[:500])
         return None
 
 def send_to_slack(df):
@@ -75,5 +90,4 @@ if __name__ == "__main__":
         print(f"✅ {len(df)}개 상품 크롤링 성공")
         send_to_slack(df)
     else:
-        print("🔴 최종 실패")
-        # 실패 시에는 별도의 알림을 보내지 않거나, 실패 알림을 보낼 수 있습니다.
+        print("🔴 최종 실패. Slack으로 실패 알림을 보내지 않습니다.")
