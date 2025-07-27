@@ -4,34 +4,55 @@ import os
 from datetime import datetime
 
 def scrape_oliveyoung_rankings():
-    # '전문 해결사' ScraperAPI의 API 키와 목표 URL을 가져옵니다.
     api_key = os.getenv("SCRAPER_API_KEY")
-    target_url = "https://www.oliveyoung.co.kr/store/main/getBestList.do"
+    
+    # 이것이 바로 '작전 지시서'입니다.
+    # ScraperAPI의 브라우저가 올리브영 페이지 안에서 실행할 JavaScript 코드입니다.
+    js_script = """
+        async function solve() {
+            const response = await fetch('/store/main/getBestList.do', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8' },
+                body: new URLSearchParams({
+                    'dispCatNo': '100000100010001',
+                    'pageIdx': '1',
+                    'rowsPerPage': '100',
+                    'sortBy': 'BEST'
+                })
+            });
+            return await response.json();
+        }
+        solve();
+    """
 
-    # '만능 열쇠'(&render=true)를 추가하여, ScraperAPI가 직접 브라우저를 사용하도록 명령합니다.
-    scraperapi_url = f'http://api.scraperapi.com?api_key={api_key}&url={target_url}&render=true'
-
-    # 올리브영에 보낼 데이터
-    target_payload = {
-        "dispCatNo": "100000100010001",
-        "pageIdx": "1",
-        "rowsPerPage": "100",
-        "sortBy": "BEST"
+    # '해결사'에게 보낼 최종 요청
+    scraperapi_payload = {
+        'api_key': api_key,
+        'url': 'https://www.oliveyoung.co.kr/store/main/main.do', # 먼저 이 페이지를 열어서 보안을 통과
+        'render': 'true', # 브라우저 사용 지시
+        'js_scenario': {'instructions': [{'execute': js_script}]} # 위 '작전 지시서' 실행
     }
+    
+    # JavaScript 시나리오를 실행하는 전용 주소
+    scraperapi_url = 'https://api.scraperapi.com/session/sync/js'
 
-    print("Sending request via ScraperAPI with Browser Rendering enabled...")
-    # ScraperAPI의 주소로, 올리브영에 보낼 데이터를 POST 방식으로 요청합니다.
-    response = requests.post(scraperapi_url, data=target_payload, timeout=120)
+    print("Sending JS Scenario request via ScraperAPI...")
+    response = requests.post(scraperapi_url, json=scraperapi_payload, timeout=180)
 
     if response.status_code != 200:
         print(f"❌ ScraperAPI failed with status code: {response.status_code}")
-        print(response.text)
+        print(f"Response text: {response.text}")
         return None
 
     try:
         data = response.json()
         items = data.get("goodsList", [])
         
+        if not items:
+            print("❌ 'goodsList' not found. It's likely the JS scenario failed.")
+            print(f"Full response: {data}")
+            return None
+
         top_products = [f"{idx+1}. [{item.get('brandNm', '').strip()}] {item.get('goodsNm', '').strip()}" for idx, item in enumerate(items)]
         return top_products
 
@@ -65,7 +86,7 @@ def send_to_slack(message_lines, is_error=False):
         print(f"❌ Failed to send Slack message: {e}")
 
 if __name__ == "__main__":
-    print("🔍 올리브영 랭킹 수집 시작 (ScraperAPI + Browser Rendering 최종 모드)")
+    print("🔍 올리브영 랭킹 수집 시작 (ScraperAPI + JS Scenario 최종 모드)")
     rankings = scrape_oliveyoung_rankings()
 
     if rankings:
