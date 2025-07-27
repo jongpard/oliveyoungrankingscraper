@@ -7,6 +7,7 @@ from datetime import datetime
 def scrape_oliveyoung_rankings():
     with sync_playwright() as p:
         try:
+            # 가상 브라우저(크로미움)를 실행합니다.
             browser = p.chromium.launch(headless=True)
             context = browser.new_context(
                 user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
@@ -16,7 +17,7 @@ def scrape_oliveyoung_rankings():
             print("Navigating to Olive Young main page to solve challenges...")
             page.goto("https://www.oliveyoung.co.kr/store/main/main.do", timeout=60000)
             
-            # 페이지가 로드될 때까지 잠시 대기 (Cloudflare가 JS 챌린지를 해결할 시간)
+            # 페이지가 완전히 로드되어 안정화될 때까지 기다립니다.
             page.wait_for_load_state('networkidle')
             print("Page loaded and challenges should be solved.")
 
@@ -28,8 +29,8 @@ def scrape_oliveyoung_rankings():
                 "sortBy": "BEST"
             }
             
-            print("Sending API request from browser context...")
-            # page.request는 현재 브라우저의 모든 쿠키와 상태를 가지고 요청함
+            print("Sending API request from the browser's context...")
+            # 현재 브라우저의 모든 쿠키와 상태를 가지고 데이터를 요청합니다.
             api_response = page.request.post(api_url, data=payload)
             
             if not api_response.ok:
@@ -59,7 +60,7 @@ def send_to_slack(message_lines, is_error=False):
     if is_error:
         text = f"🚨 올리브영 랭킹 수집 실패\n{message_lines[0]}"
     else:
-        text = f"🏆 올리브영 랭킹 Top {len(message_lines[:10])}"
+        text = f"🏆 올리브영 랭킹 Top {len(message_lines[:10])}" if message_lines else "데이터 없음"
 
     blocks = [
         {"type": "section", "text": {"type": "mrkdwn", "text": f"*{text}*"}},
