@@ -1,6 +1,6 @@
 import requests
 from playwright.sync_api import sync_playwright
-from playwright_stealth import stealth_sync # '투명 망토'를 올바른 방식으로 불러옵니다.
+from playwright_stealth.sync import stealth_sync # '투명 망토'를 올바른 경로에서 불러옵니다.
 import json
 import os
 from datetime import datetime
