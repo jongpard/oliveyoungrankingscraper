@@ -1,19 +1,39 @@
 import requests
-from bs4 import BeautifulSoup
 import json
 import os
 from datetime import datetime
 
 def scrape_oliveyoung_rankings():
     api_key = os.getenv("SCRAPER_API_KEY")
-    # 이제 데이터 API가 아닌, 사람이 보는 실제 랭킹 페이지 주소를 목표로 합니다.
-    target_url = "https://www.oliveyoung.co.kr/store/ranking/getBestList.do"
+    if not api_key:
+        raise ValueError("SCRAPER_API_KEY is not set in GitHub Secrets.")
 
-    # '만능 열쇠'(&render=true)를 사용하여, ScraperAPI가 JS를 모두 실행하고 최종 HTML을 가져오도록 합니다.
-    scraperapi_url = f'http://api.scraperapi.com?api_key={api_key}&url={target_url}&render=true'
+    # 올리브영의 진짜 데이터 API 주소
+    target_url = "https://www.oliveyoung.co.kr/store/main/getBestList.do"
 
-    print("Sending request via ScraperAPI with Browser Rendering enabled...")
-    response = requests.get(scraperapi_url, timeout=180) # 렌더링을 위해 타임아웃을 3분으로 넉넉하게 설정
+    # 올리브영 서버가 요구하는 '주문서' (POST 데이터)
+    target_payload = {
+        "dispCatNo": "100000100010001",
+        "pageIdx": "1",
+        "rowsPerPage": "100",
+        "sortBy": "BEST"
+    }
+
+    # '전문 해결사' ScraperAPI에게 내릴 최종 작전 지시
+    scraperapi_payload = {
+        'api_key': api_key,
+        'url': target_url,          # 이 주소로
+        'method': 'POST',           # POST 요청을 보내고
+        'form_data': target_payload, # 이 '주문서'를 제출해줘
+        'render': 'true',           # 만약 막히면, 브라우저('만능 열쇠')를 사용해서라도
+        'country_code': 'kr'        # 한국에서 접속한 것처럼 해줘
+    }
+    
+    # ScraperAPI의 표준 요청 주소
+    scraperapi_url = 'https://api.scraperapi.com/'
+
+    print("Sending POST request via ScraperAPI with Browser Rendering...")
+    response = requests.post(scraperapi_url, json=scraperapi_payload, timeout=180)
 
     if response.status_code != 200:
         print(f"❌ ScraperAPI failed with status code: {response.status_code}")
@@ -21,27 +41,18 @@ def scrape_oliveyoung_rankings():
         return None
 
     try:
-        # 이제 JSON이 아닌, 최종 결과물인 HTML을 분석합니다.
-        soup = BeautifulSoup(response.text, 'html.parser')
+        data = response.json()
+        items = data.get("goodsList", [])
         
-        # 랭킹 리스트의 각 아이템을 선택합니다.
-        product_list = soup.select('#rank-best-list .prd_item')
-        
-        if not product_list:
-            raise ValueError("Could not find the product list. The page structure might have changed.")
+        if not items:
+            raise ValueError("'goodsList' not found in the response.")
 
-        top_products = []
-        for item in product_list[:100]: # 100위까지만 가져옵니다.
-            rank = item.select_one('.prd_rank > em').text.strip()
-            brand = item.select_one('.prd_brand').text.strip()
-            name = item.select_one('.prd_name').text.strip()
-            top_products.append(f"{rank}. [{brand}] {name}")
-            
+        top_products = [f"{idx+1}. [{item.get('brandNm', '').strip()}] {item.get('goodsNm', '').strip()}" for idx, item in enumerate(items)]
         return top_products
 
-    except Exception as e:
+    except (json.JSONDecodeError, ValueError) as e:
         print(f"❌ An error occurred during parsing: {e}")
-        print("Response from server was (first 500 chars):")
+        print("Response from server was:")
         print(response.text[:500])
         return None
 
@@ -69,7 +80,7 @@ def send_to_slack(message_lines, is_error=False):
         print(f"❌ Failed to send Slack message: {e}")
 
 if __name__ == "__main__":
-    print("🔍 올리브영 랭킹 수집 시작 (ScraperAPI + HTML Parsing 최종 모드)")
+    print("🔍 올리브영 랭킹 수집 시작 (ScraperAPI + POST + Browser Rendering 최종 모드)")
     rankings = scrape_oliveyoung_rankings()
 
     if rankings:
@@ -77,4 +88,4 @@ if __name__ == "__main__":
         send_to_slack(rankings)
     else:
         print("❌ Scraping failed.")
-        send_to_slack(["ScraperAPI를 통한 요청 또는 HTML 분석에 실패했습니다."], is_error=True)
+        send_to_slack(["ScraperAPI를 통한 최종 요청에 실패했습니다. GitHub Actions 로그를 확인해주세요."], is_error=True)
