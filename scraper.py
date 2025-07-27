@@ -8,25 +8,28 @@ async def scrape_oliveyoung():
         page = await browser.new_page()
         await page.goto("https://www.oliveyoung.co.kr/store/main/main.do")
 
-        # BEST 랭킹 탭 클릭
+        # '랭킹' 탭 클릭 (동적 로딩 대응)
         await page.click("text=랭킹")
+        await page.wait_for_timeout(3000)  # 충분한 로딩 대기
 
-        # 데이터 기다리기
         await page.wait_for_selector(".prd_info", timeout=10000)
-
-        elements = await page.query_selector_all(".prd_info")
+        items = await page.query_selector_all(".prd_info")
 
         data = []
-        for el in elements[:10]:  # 상위 10개만
-            title_el = await el.query_selector(".tx_name")
-            price_el = await el.query_selector(".price")
-            title = await title_el.inner_text() if title_el else "상품명 없음"
-            price = await price_el.inner_text() if price_el else "가격 없음"
-            data.append({"title": title.strip(), "price": price.strip()})
+        for item in items[:10]:
+            name = await item.query_selector(".tx_name")
+            price = await item.query_selector(".price")
+
+            name_text = await name.inner_text() if name else "이름 없음"
+            price_text = await price.inner_text() if price else "가격 없음"
+
+            data.append({
+                "title": name_text.strip(),
+                "price": price_text.strip()
+            })
 
         await browser.close()
         return data
 
-# GitHub Actions용 entry point
 def scrape():
     return asyncio.run(scrape_oliveyoung())
