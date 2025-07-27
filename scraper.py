@@ -6,7 +6,7 @@ on:
   workflow_dispatch:     # 수동 실행 버튼 추가
 
 jobs:
-  run:
+  scrape:
     runs-on: ubuntu-latest
 
     steps:
@@ -24,5 +24,4 @@ jobs:
       - name: Run scraper
         env:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
-          SCRAPER_API_KEY: ${{ secrets.SCRAPER_API_KEY }}
         run: python app.py
