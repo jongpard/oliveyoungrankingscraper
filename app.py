@@ -4,11 +4,15 @@ import os
 from datetime import datetime
 
 def scrape_oliveyoung_rankings():
-    # '전문 해결사' ScraperAPI를 통해 요청합니다.
-    scraperapi_url = 'http://api.scraperapi.com'
-    
-    # 올리브영의 실제 데이터 API 주소와 전송할 데이터
+    # '전문 해결사' ScraperAPI의 API 키와 목표 URL을 가져옵니다.
+    api_key = os.getenv("SCRAPER_API_KEY")
     target_url = "https://www.oliveyoung.co.kr/store/main/getBestList.do"
+
+    # ScraperAPI에 보낼 올바른 주소 형식입니다.
+    # API 키와 목표 URL을 주소에 직접 포함시킵니다.
+    scraperapi_url = f'http://api.scraperapi.com?api_key={api_key}&url={target_url}'
+
+    # 올리브영에 보낼 데이터 (이것이 패키지의 내용물입니다)
     target_payload = {
         "dispCatNo": "100000100010001",
         "pageIdx": "1",
@@ -16,17 +20,9 @@ def scrape_oliveyoung_rankings():
         "sortBy": "BEST"
     }
 
-    # ScraperAPI에 보낼 최종 요청 정보
-    api_payload = {
-        'api_key': os.getenv("SCRAPER_API_KEY"),
-        'url': target_url,
-        'method': 'POST', # POST 방식으로 요청
-        'body': target_payload, # 올리브영에 보낼 데이터를 'body'에 담음
-        'country_code': 'kr' # 한국에서 접속한 것처럼
-    }
-
-    print("Sending request via ScraperAPI...")
-    response = requests.post(scraperapi_url, json=api_payload, timeout=120) # 타임아웃 2분
+    print("Sending request via ScraperAPI (Correct Method)...")
+    # '해결사'의 올바른 주소로, '패키지 내용물'을 보내달라고 POST 요청합니다.
+    response = requests.post(scraperapi_url, data=target_payload, timeout=120)
 
     if response.status_code != 200:
         print(f"❌ ScraperAPI failed with status code: {response.status_code}")
@@ -40,9 +36,9 @@ def scrape_oliveyoung_rankings():
         top_products = [f"{idx+1}. [{item.get('brandNm', '').strip()}] {item.get('goodsNm', '').strip()}" for idx, item in enumerate(items)]
         return top_products
 
-    except Exception as e:
-        print(f"❌ An error occurred: {e}")
-        print("Response from server was not valid JSON:")
+    except json.JSONDecodeError:
+        print(f"❌ An error occurred: Could not decode JSON.")
+        print("Response from server was:")
         print(response.text[:500])
         return None
 
