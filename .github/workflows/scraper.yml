@@ -1,12 +1,12 @@
-name: Run OliveYoung Scraper
+name: Scrape Olive Young Rankings
 
 on:
+  workflow_dispatch:
   schedule:
-    - cron: "0 0 * * *"  # 매일 자정 UTC 기준 실행 (한국 기준 오전 9시)
-  workflow_dispatch:     # 수동 실행 버튼 추가
+    - cron: '0 0 * * *'  # 매일 00:00 UTC 실행
 
 jobs:
-  run:
+  run-script:
     runs-on: ubuntu-latest
 
     steps:
@@ -16,13 +16,12 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
-          python-version: "3.10"
+          python-version: '3.10'
 
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Run scraper
+      - name: Run script
         env:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
-          SCRAPER_API_KEY: ${{ secrets.SCRAPER_API_KEY }}
         run: python app.py
