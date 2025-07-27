@@ -1,42 +1,53 @@
 import requests
 import pandas as pd
 import os
+import json
 from datetime import datetime
 
 def fetch_oliveyoung_rankings():
     """
-    올리브영의 모바일 실시간 랭킹 API를 직접 호출하여 데이터를 가져옵니다.
-    이것이 현재 다른 개발자들이 성공적으로 사용하는 방식입니다.
+    올리브영의 모바일 실시간 랭킹 API를 직접 호출하되,
+    서버 응답에 HTML이 섞여 들어오는 경우를 처리하여 안정성을 높입니다.
     """
-    # 다른 개발자들의 성공 사례에서 발견한 '숨겨진' 모바일 API 엔드포인트
     url = "https://m.oliveyoung.co.kr/m/mc/main/getRankAll.do"
-    
-    # 모바일 앱인 것처럼 위장하기 위한 헤더
     headers = {
         'User-Agent': 'OliveYoungApp/7.2.1 (iOS; 15.4.1; iPhone)',
-        'Content-Type': 'application/json;charset=UTF-8'
+        'Content-Type': 'application/json;charset=UTF-8',
+        'X-Requested-With': 'XMLHttpRequest' # 모바일 앱 요청처럼 보이게 하는 추가 헤더
     }
-
-    # API가 요구하는 '주문서' (카테고리 번호가 핵심)
     payload = {
-        "dispCatNo": "90000010001", # 실시간 랭킹 전체 카테고리
+        "dispCatNo": "90000010001",
         "pageIdx": "1",
         "rowsPerPage": "100"
     }
 
-    print("📥 올리브영 랭킹 크롤링 시작 (모바일 API 직접 호출 방식)")
+    print("📥 올리브영 랭킹 크롤링 시작 (모바일 API + 데이터 정제 최종 방식)")
     
     try:
-        # GET이 아닌 POST 방식으로, '주문서(payload)'를 JSON 형태로 전송
         response = requests.post(url, headers=headers, json=payload, timeout=30)
-        response.raise_for_status() # 요청이 실패하면 여기서 에러 발생
+        response.raise_for_status()
 
-        items = response.json().get("bestList", [])
-        if not items:
-            print("❌ 응답에서 'bestList'를 찾을 수 없습니다.")
-            return None
+        # --- 데이터 정제 로직 시작 ---
+        # 서버가 보낸 텍스트 전체를 가져옵니다.
+        response_text = response.text
         
-        # 데이터를 DataFrame으로 변환하여 처리
+        # 진짜 JSON 데이터는 '{' 로 시작합니다. 그 부분을 찾습니다.
+        json_start_index = response_text.find('{')
+        
+        if json_start_index == -1:
+            raise ValueError("응답에서 JSON 시작 부분('{')을 찾을 수 없습니다.")
+
+        # '{' 부터 끝까지가 우리가 필요한 진짜 데이터입니다.
+        json_data_string = response_text[json_start_index:]
+        # --- 데이터 정제 로직 끝 ---
+
+        # 정제된 텍스트를 JSON으로 변환합니다.
+        data = json.loads(json_data_string)
+        items = data.get("bestList", [])
+        
+        if not items:
+            raise ValueError("정제된 데이터에서 'bestList'를 찾을 수 없습니다.")
+        
         df = pd.DataFrame(items)
         df['rank'] = df['rnk'].astype(int)
         df['brand'] = df['brnd_nm']
@@ -54,22 +65,12 @@ def fetch_oliveyoung_rankings():
         return None
 
 def send_to_slack(df):
-    """
-    결과를 Slack으로 전송합니다.
-    """
     webhook_url = os.getenv("SLACK_WEBHOOK_URL")
-    if not webhook_url:
-        print("⚠️ SLACK_WEBHOOK_URL이 설정되지 않았습니다.")
-        return
+    if not webhook_url: return
 
-    # 슬랙 메시지로 보낼 텍스트 생성 (상위 10개)
-    top_10_list = []
-    for index, row in df.head(10).iterrows():
-        top_10_list.append(f"{row['rank']}. [{row['brand']}] {row['name']}")
-    
+    top_10_list = [f"{row['rank']}. [{row['brand']}] {row['name']}" for index, row in df.head(10).iterrows()]
     message_text = "\n".join(top_10_list)
     title = f"🏆 올리브영 실시간 랭킹 Top {len(top_10_list)}"
-
     blocks = [
         {"type": "section", "text": {"type": "mrkdwn", "text": f"*{title}*"}},
         {"type": "divider"},
@@ -90,4 +91,4 @@ if __name__ == "__main__":
         print(f"✅ {len(df)}개 상품 크롤링 성공")
         send_to_slack(df)
     else:
-        print("🔴 최종 실패. Slack으로 실패 알림을 보내지 않습니다.")
+        print("🔴 최종 실패.")
