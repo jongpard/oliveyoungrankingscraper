@@ -17,11 +17,10 @@ def scrape_oliveyoung_rankings():
         "sortBy": "BEST"
     }
     
-    # ScraperAPI에 보낼 올바른 주소 형식입니다.
-    # API 키와 목표 URL을 주소에 직접 포함시키고, POST 데이터는 별도로 보냅니다.
-    scraperapi_url = f'http://api.scraperapi.com?api_key={api_key}&url={target_url}'
+    # '만능 열쇠'(&render=true)를 추가하여, ScraperAPI가 직접 브라우저를 사용하도록 명령합니다.
+    scraperapi_url = f'http://api.scraperapi.com?api_key={api_key}&url={target_url}&render=true'
 
-    print("Sending request via ScraperAPI (Correct Method)...")
+    print("Sending request via ScraperAPI with Browser Rendering enabled...")
     # '해결사'의 올바른 주소로, '패키지 내용물'을 보내달라고 POST 요청합니다.
     response = requests.post(scraperapi_url, data=target_payload, timeout=120)
 
@@ -67,7 +66,7 @@ def send_to_slack(message_lines, is_error=False):
         print(f"❌ Failed to send Slack message: {e}")
 
 if __name__ == "__main__":
-    print("🔍 올리브영 랭킹 수집 시작 (ScraperAPI 최종 모드)")
+    print("🔍 올리브영 랭킹 수집 시작 (ScraperAPI + Browser Rendering 최종 모드)")
     rankings = scrape_oliveyoung_rankings()
 
     if rankings:
