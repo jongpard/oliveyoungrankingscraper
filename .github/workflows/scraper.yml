@@ -19,16 +19,10 @@ jobs:
           python-version: "3.10"
 
       - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
-      
-      # 이 부분이 추가되어야 합니다!
-      - name: Install Playwright Browsers
-        run: playwright install chromium
+        run: pip install -r requirements.txt
 
       - name: Run scraper
         env:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
-        run: |
-          python app.py
+          SCRAPER_API_KEY: ${{ secrets.SCRAPER_API_KEY }}
+        run: python app.py
