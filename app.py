@@ -5,14 +5,20 @@ from datetime import datetime
 
 def scrape_oliveyoung_rankings():
     url = "https://www.oliveyoung.co.kr/store/main/getBestList.do"
+    
+    # 실제 브라우저처럼 보이게 헤더 정보 강화
     headers = {
+        "Accept": "application/json, text/javascript, */*; q=0.01",
         "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36"
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+        "Referer": "https://www.oliveyoung.co.kr/store/main/getBestList.do",
+        "X-Requested-With": "XMLHttpRequest"
     }
+
     payload = {
-        "dispCatNo": "100000100010001",  # 스킨케어 예시
+        "dispCatNo": "100000100010001",  # 스킨케어 카테고리
         "pageIdx": "1",
-        "rowsPerPage": "20",
+        "rowsPerPage": "100",  # 100위까지 수집
         "sortBy": "BEST"
     }
 
@@ -21,24 +27,22 @@ def scrape_oliveyoung_rankings():
     print(f"Received response with status code: {response.status_code}")
 
     try:
-        # JSON 파싱 시도
         data = response.json()
         items = data.get("goodsList", [])
-
+        
         top_products = []
         for idx, item in enumerate(items, start=1):
-            name = item.get("goodsNm", "")
-            brand = item.get("brandNm", "")
+            name = item.get("goodsNm", "").strip()
+            brand = item.get("brandNm", "").strip()
             top_products.append(f"{idx}. [{brand}] {name}")
 
         return top_products
 
     except json.JSONDecodeError:
-        # JSON 파싱 실패 시, 원본 응답 내용을 로그에 출력
         print("❌ Failed to decode JSON.")
         print("Server response was:")
-        print(response.text[:500])  # 너무 길지 않게 앞부분 500자만 출력
-        return None # 실패했음을 알리기 위해 None 반환
+        print(response.text[:500])
+        return None
 
 def send_to_slack(message_lines, is_error=False):
     webhook_url = os.getenv("SLACK_WEBHOOK_URL")
@@ -50,9 +54,10 @@ def send_to_slack(message_lines, is_error=False):
         text = f"🚨 올리브영 랭킹 수집 실패\n{message_lines[0]}"
         blocks = [{"type": "section", "text": {"type": "mrkdwn", "text": text}}]
     else:
-        text = "*📦 올리브영 랭킹 스크래핑 완료!*"
+        text = f"🏆 올리브영 랭킹 Top {len(message_lines[:10])}"
         blocks = [
             {"type": "section", "text": {"type": "mrkdwn", "text": text}},
+            {"type": "divider"},
             {"type": "section", "text": {"type": "mrkdwn", "text": "\n".join(message_lines[:10])}},
             {"type": "context", "elements": [{"type": "mrkdwn", "text": f"🕒 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"}]}
         ]
@@ -76,4 +81,4 @@ if __name__ == "__main__":
         send_to_slack(rankings)
     else:
         print("❌ Scraping failed.")
-        send_to_slack(["JSON 파싱에 실패했습니다. GitHub Actions 로그를 확인해주세요."], is_error=True)
+        send_to_slack(["올리브영 서버에서 접근을 차단했습니다. GitHub Actions 로그를 확인해주세요."], is_error=True)
