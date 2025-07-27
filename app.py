@@ -1,4 +1,4 @@
-import requests # 슬랙 메시지 전송을 위해 다시 추가!
+import requests
 from playwright.sync_api import sync_playwright
 import json
 import os
@@ -7,19 +7,18 @@ from datetime import datetime
 def scrape_oliveyoung_rankings():
     with sync_playwright() as p:
         try:
-            # 가상 브라우저(크로미움)를 실행합니다.
             browser = p.chromium.launch(headless=True)
             context = browser.new_context(
                 user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
             )
             page = context.new_page()
 
-            print("Navigating to Olive Young main page to solve challenges...")
-            page.goto("https://www.oliveyoung.co.kr/store/main/main.do", timeout=60000)
+            print("Navigating to Olive Young main page...")
+            # 타임아웃을 2분(120,000ms)으로 늘려서 안정성 확보
+            page.goto("https://www.oliveyoung.co.kr/store/main/main.do", timeout=120000)
             
-            # 페이지가 완전히 로드되어 안정화될 때까지 기다립니다.
-            page.wait_for_load_state('networkidle')
-            print("Page loaded and challenges should be solved.")
+            page.wait_for_load_state('networkidle', timeout=60000)
+            print("Page loaded successfully.")
 
             api_url = "https://www.oliveyoung.co.kr/store/main/getBestList.do"
             payload = {
@@ -30,7 +29,6 @@ def scrape_oliveyoung_rankings():
             }
             
             print("Sending API request from the browser's context...")
-            # 현재 브라우저의 모든 쿠키와 상태를 가지고 데이터를 요청합니다.
             api_response = page.request.post(api_url, data=payload)
             
             if not api_response.ok:
@@ -58,16 +56,21 @@ def send_to_slack(message_lines, is_error=False):
     if not webhook_url: return
 
     if is_error:
-        text = f"🚨 올리브영 랭킹 수집 실패\n{message_lines[0]}"
+        text = f"🚨 올리브영 랭킹 수집 실패"
+        error_message = message_lines[0] if message_lines else "알 수 없는 에러"
+        blocks = [
+            {"type": "section", "text": {"type": "mrkdwn", "text": f"*{text}*"}},
+            {"type": "section", "text": {"type": "mrkdwn", "text": error_message}},
+            {"type": "context", "elements": [{"type": "mrkdwn", "text": f"🕒 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"}]}
+        ]
     else:
         text = f"🏆 올리브영 랭킹 Top {len(message_lines[:10])}" if message_lines else "데이터 없음"
-
-    blocks = [
-        {"type": "section", "text": {"type": "mrkdwn", "text": f"*{text}*"}},
-        {"type": "divider"},
-        {"type": "section", "text": {"type": "mrkdwn", "text": "\n".join(message_lines[:10]) if not is_error and message_lines else ""}},
-        {"type": "context", "elements": [{"type": "mrkdwn", "text": f"🕒 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"}]}
-    ]
+        blocks = [
+            {"type": "section", "text": {"type": "mrkdwn", "text": f"*{text}*"}},
+            {"type": "divider"},
+            {"type": "section", "text": {"type": "mrkdwn", "text": "\n".join(message_lines[:10]) if message_lines else ""}},
+            {"type": "context", "elements": [{"type": "mrkdwn", "text": f"🕒 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"}]}
+        ]
     
     try:
         requests.post(webhook_url, json={"text": text, "blocks": blocks}, timeout=10).raise_for_status()
@@ -76,7 +79,7 @@ def send_to_slack(message_lines, is_error=False):
         print(f"❌ Failed to send Slack message: {e}")
 
 if __name__ == "__main__":
-    print("🔍 올리브영 랭킹 수집 시작 (Playwright 모드)")
+    print("🔍 올리브영 랭킹 수집 시작 (Playwright 최종 모드)")
     rankings = scrape_oliveyoung_rankings()
 
     if rankings:
@@ -84,4 +87,4 @@ if __name__ == "__main__":
         send_to_slack(rankings)
     else:
         print("❌ Scraping failed.")
-        send_to_slack(["Playwright 실행 중 에러가 발생했습니다. 로그를 확인해주세요."], is_error=True)
+        send_to_slack(["Playwright 실행 중 타임아웃 또는 에러가 발생했습니다."], is_error=True)
