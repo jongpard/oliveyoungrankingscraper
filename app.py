@@ -14,11 +14,12 @@ def scrape_oliveyoung_rankings():
             page = context.new_page()
 
             print("Navigating to Olive Young main page...")
-            # 타임아웃을 2분(120,000ms)으로 늘려서 안정성 확보
             page.goto("https://www.oliveyoung.co.kr/store/main/main.do", timeout=120000)
             
-            page.wait_for_load_state('networkidle', timeout=60000)
-            print("Page loaded successfully.")
+            # 전략 변경: 페이지 전체가 안정화되길 기다리는 대신, 핵심 요소인 '검색창'이 나타날 때까지 최대 2분간 기다립니다.
+            print("Waiting for a key element (#query) to appear...")
+            page.wait_for_selector("#query", timeout=120000)
+            print("Key element found. Page is ready.")
 
             api_url = "https://www.oliveyoung.co.kr/store/main/getBestList.do"
             payload = {
@@ -33,6 +34,7 @@ def scrape_oliveyoung_rankings():
             
             if not api_response.ok:
                 print(f"API request failed with status {api_response.status}")
+                browser.close()
                 return None
             
             data = api_response.json()
@@ -49,6 +51,8 @@ def scrape_oliveyoung_rankings():
 
         except Exception as e:
             print(f"❌ An error occurred during scraping: {e}")
+            if 'browser' in locals() and browser.is_connected():
+                browser.close()
             return None
 
 def send_to_slack(message_lines, is_error=False):
@@ -79,7 +83,7 @@ def send_to_slack(message_lines, is_error=False):
         print(f"❌ Failed to send Slack message: {e}")
 
 if __name__ == "__main__":
-    print("🔍 올리브영 랭킹 수집 시작 (Playwright 최종 모드)")
+    print("🔍 올리브영 랭킹 수집 시작 (Playwright 최종 안정화 모드)")
     rankings = scrape_oliveyoung_rankings()
 
     if rankings:
@@ -87,4 +91,4 @@ if __name__ == "__main__":
         send_to_slack(rankings)
     else:
         print("❌ Scraping failed.")
-        send_to_slack(["Playwright 실행 중 타임아웃 또는 에러가 발생했습니다."], is_error=True)
+        send_to_slack(["Playwright 실행 중 에러가 발생했습니다. 로그를 확인해주세요."], is_error=True)
