@@ -1,69 +1,68 @@
 import requests
-from playwright.sync_api import sync_playwright
-from playwright_stealth import stealth_sync # playwright-stealth==1.0.6 버전에 맞는 import
 import json
 import os
 from datetime import datetime
 
 def scrape_oliveyoung_rankings():
-    with sync_playwright() as p:
-        try:
-            browser = p.chromium.launch(headless=True)
-            context = browser.new_context(
-                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
-            )
-            page = context.new_page()
+    # '전문 해결사' ScraperAPI를 통해 요청합니다.
+    scraperapi_url = 'http://api.scraperapi.com'
+    
+    # 올리브영의 실제 데이터 API 주소와 전송할 데이터
+    target_url = "https://www.oliveyoung.co.kr/store/main/getBestList.do"
+    target_payload = {
+        "dispCatNo": "100000100010001",
+        "pageIdx": "1",
+        "rowsPerPage": "100",
+        "sortBy": "BEST"
+    }
 
-            # '투명 망토' 적용
-            stealth_sync(page)
+    # ScraperAPI에 보낼 최종 요청 정보
+    api_payload = {
+        'api_key': os.getenv("SCRAPER_API_KEY"),
+        'url': target_url,
+        'method': 'POST', # POST 방식으로 요청
+        'body': target_payload, # 올리브영에 보낼 데이터를 'body'에 담음
+        'country_code': 'kr' # 한국에서 접속한 것처럼
+    }
 
-            print("Navigating to Olive Young main page with STEALTH mode...")
-            page.goto("https://www.oliveyoung.co.kr/store/main/main.do", timeout=120000)
-            
-            print("Waiting for the page to pass security checks...")
-            page.wait_for_function("document.title.includes('OLIVEYOUNG')", timeout=120000)
-            print("Security check passed. Page is ready.")
+    print("Sending request via ScraperAPI...")
+    response = requests.post(scraperapi_url, json=api_payload, timeout=120) # 타임아웃 2분
 
-            api_url = "https://www.oliveyoung.co.kr/store/main/getBestList.do"
-            payload = { "dispCatNo": "100000100010001", "pageIdx": "1", "rowsPerPage": "100", "sortBy": "BEST" }
-            
-            print("Sending API request from the stealthy browser's context...")
-            api_response = page.request.post(api_url, data=payload)
-            
-            if not api_response.ok:
-                raise Exception(f"API request failed with status {api_response.status}")
-            
-            data = api_response.json()
-            items = data.get("goodsList", [])
-            
-            top_products = [f"{idx+1}. [{item.get('brandNm', '').strip()}] {item.get('goodsNm', '').strip()}" for idx, item in enumerate(items)]
-            
-            browser.close()
-            return top_products
+    if response.status_code != 200:
+        print(f"❌ ScraperAPI failed with status code: {response.status_code}")
+        print(response.text)
+        return None
 
-        except Exception as e:
-            print(f"❌ An error occurred during scraping: {e}")
-            if 'browser' in locals() and browser.is_connected():
-                browser.close()
-            return None
+    try:
+        data = response.json()
+        items = data.get("goodsList", [])
+        
+        top_products = [f"{idx+1}. [{item.get('brandNm', '').strip()}] {item.get('goodsNm', '').strip()}" for idx, item in enumerate(items)]
+        return top_products
+
+    except Exception as e:
+        print(f"❌ An error occurred: {e}")
+        print("Response from server was not valid JSON:")
+        print(response.text[:500])
+        return None
 
 def send_to_slack(message_lines, is_error=False):
     webhook_url = os.getenv("SLACK_WEBHOOK_URL")
     if not webhook_url: return
 
-    if is_error:
-        text = f"🚨 올리브영 랭킹 수집 실패"
-        error_message = message_lines[0] if message_lines else "알 수 없는 에러"
-    else:
-        text = f"🏆 올리브영 랭킹 Top {len(message_lines[:10])}" if message_lines else "데이터 없음"
-
+    text = f"🚨 올리브영 랭킹 수집 실패" if is_error else f"🏆 올리브영 랭킹 Top {len(message_lines[:10])}"
+    
     blocks = [
         {"type": "section", "text": {"type": "mrkdwn", "text": f"*{text}*"}},
         {"type": "divider"},
-        {"type": "section", "text": {"type": "mrkdwn", "text": "\n".join(message_lines[:10]) if not is_error and message_lines else (error_message if is_error else "")}},
-        {"type": "context", "elements": [{"type": "mrkdwn", "text": f"🕒 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"}]}
     ]
-    
+    if not is_error and message_lines:
+        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": "\n".join(message_lines[:10])}})
+    elif is_error and message_lines:
+         blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": message_lines[0]}})
+
+    blocks.append({"type": "context", "elements": [{"type": "mrkdwn", "text": f"🕒 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"}]})
+
     try:
         requests.post(webhook_url, json={"text": text, "blocks": blocks}, timeout=10).raise_for_status()
         print("✅ Slack message sent successfully")
@@ -71,7 +70,7 @@ def send_to_slack(message_lines, is_error=False):
         print(f"❌ Failed to send Slack message: {e}")
 
 if __name__ == "__main__":
-    print("🔍 올리브영 랭킹 수집 시작 (Playwright + STEALTH v1.0.6 최종 모드)")
+    print("🔍 올리브영 랭킹 수집 시작 (ScraperAPI 최종 모드)")
     rankings = scrape_oliveyoung_rankings()
 
     if rankings:
@@ -79,4 +78,4 @@ if __name__ == "__main__":
         send_to_slack(rankings)
     else:
         print("❌ Scraping failed.")
-        send_to_slack(["Cloudflare 보안 페이지를 통과하지 못했습니다."], is_error=True)
+        send_to_slack(["ScraperAPI를 통한 요청에 실패했습니다. 로그를 확인해주세요."], is_error=True)
