@@ -1,2 +1,4 @@
-playwright
+undetected-chromedriver
+beautifulsoup4
+selenium
 requests
