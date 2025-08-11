@@ -1,41 +1,48 @@
-from playwright.sync_api import sync_playwright
+import os
+import time
 import json
-import datetime
+import requests
+from bs4 import BeautifulSoup
+import undetected_chromedriver as uc
+from selenium.webdriver.chrome.options import Options
+
+# Slack Webhook URL (GitHub Secrets에서 불러오기)
+SLACK_WEBHOOK = os.getenv("SLACK_WEBHOOK_URL")
+
+# 올리브영 랭킹 페이지
+URL = "https://www.oliveyoung.co.kr/store/main/getBestList.do"
+
+def send_to_slack(message):
+    """슬랙으로 메시지 전송"""
+    payload = {"text": message}
+    requests.post(SLACK_WEBHOOK, json=payload)
 
 def scrape_oliveyoung():
-    url = "https://www.oliveyoung.co.kr/store/main/getBestList.do"
-    data = []
+    """올리브영 랭킹 데이터 크롤링"""
+    options = Options()
+    options.headless = True
+    options.add_argument("--disable-blink-features=AutomationControlled")
+    options.add_argument("--no-sandbox")
+    options.add_argument("--disable-dev-shm-usage")
 
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
-        page = browser.new_page()
+    driver = uc.Chrome(options=options)
+    driver.get(URL)
+    time.sleep(3)  # 페이지 로딩 대기
 
-        # Cloudflare 우회를 위해 브라우저처럼 접근
-        page.goto(url, timeout=60000)
+    soup = BeautifulSoup(driver.page_source, "html.parser")
+    driver.quit()
 
-        # 랭킹 아이템 추출
-        items = page.locator("ul.cate_prd_list li").all()
-
-        for idx, item in enumerate(items, start=1):
-            title = item.locator(".tx_name").inner_text()
-            price = item.locator(".tx_cur").inner_text()
-            link = item.locator("a").get_attribute("href")
-            data.append({
-                "rank": idx,
-                "title": title.strip(),
-                "price": price.strip(),
-                "link": f"https://www.oliveyoung.co.kr{link}"
-            })
-
-        browser.close()
-
-    # 결과 저장
-    today = datetime.date.today().isoformat()
-    with open(f"ranking_{today}.json", "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-
-    return data
+    items = soup.select(".ranking_list .prd_info")
+    results = []
+    for idx, item in enumerate(items[:10], start=1):
+        name = item.select_one(".tx_name").get_text(strip=True)
+        price = item.select_one(".tx_cur").get_text(strip=True)
+        results.append(f"{idx}위: {name} - {price}")
+    return "\n".join(results)
 
 if __name__ == "__main__":
-    results = scrape_oliveyoung()
-    print(json.dumps(results, ensure_ascii=False, indent=2))
+    try:
+        ranking_text = scrape_oliveyoung()
+        send_to_slack(f"📊 오늘의 올리브영 랭킹 Top 10\n{ranking_text}")
+    except Exception as e:
+        send_to_slack(f"❌ 랭킹 크롤링 실패: {str(e)}")
