@@ -2,7 +2,7 @@ name: OliveYoung Total Ranking Scraper
 
 on:
   schedule:
-    - cron: "0 3 * * *"    # 매일 03:00 UTC => 한국 12:00 (KST) — 사용자 요청대로 낮 12시 KST 실행
+    - cron: "0 5 * * *"    # 매일 03:00 UTC => 한국 12:00 (KST) — 사용자 요청대로 낮 12시 KST 실행
   workflow_dispatch:
 
 jobs:
