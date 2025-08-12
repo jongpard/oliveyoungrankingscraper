@@ -1,4 +1,4 @@
-undetected-chromedriver
-beautifulsoup4
-selenium
-requests
+requests>=2.28.0
+beautifulsoup4>=4.11.1
+playwright>=1.54.0
+urllib3
