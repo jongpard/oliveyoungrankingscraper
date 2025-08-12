@@ -1,0 +1,17 @@
+name: Diag Secrets
+on: { workflow_dispatch: {} }
+jobs:
+  diag:
+    runs-on: ubuntu-latest
+    env:
+      GDRIVE_SA_JSON_B64: ${{ secrets.GDRIVE_SA_JSON_B64 }}
+      GDRIVE_FOLDER_ID:   ${{ secrets.GDRIVE_FOLDER_ID }}
+    steps:
+      - name: Show env presence
+        run: |
+          python - << 'PY'
+          import os
+          for k in ["GDRIVE_SA_JSON_B64","GDRIVE_FOLDER_ID"]:
+              v = os.getenv(k)
+              print(k, "=", "SET" if v else "MISSING", "| length =", (len(v) if v else 0))
+          PY
