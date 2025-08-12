@@ -5,9 +5,9 @@ jobs:
     # ✅ 모든 스텝이 상속받게 job 레벨에 시크릿 주입
     env:
       SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
-      DROPBOX_APP_KEY: ${{ secrets.DROPBOX_APP_KEY }}
-      DROPBOX_APP_SECRET: ${{ secrets.DROPBOX_APP_SECRET }}
-      DROPBOX_REFRESH_TOKEN: ${{ secrets.DROPBOX_REFRESH_TOKEN }}
+      DROPBOX_APP_KEY: ${{ mt8yis35ti7nvd4 }}
+      DROPBOX_APP_SECRET: ${{ 4plpjwlnhvg0ywl }}
+      DROPBOX_REFRESH_TOKEN: ${{ xr1apKHpE1sAAAAAAAAAAQ12r0xlvuSSSsFZGg9s8kzJMX5n0Xaq-np7R6oOw_AH }}
 
     steps:
       - uses: actions/checkout@v4
