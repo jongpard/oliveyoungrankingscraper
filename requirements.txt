@@ -8,3 +8,5 @@ beautifulsoup4
 pytz
 undetected-chromedriver
 selenium
+dropbox
+openpyxl
