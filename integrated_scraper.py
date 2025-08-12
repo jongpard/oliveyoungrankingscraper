@@ -381,46 +381,92 @@ async def main():
     """메인 실행 함수"""
     print("🚀 올리브영 통합 스크래퍼 시작\n")
     
+    # 환경변수 상태 확인
+    print("🔧 환경변수 상태:")
+    print(f"  - SLACK_WEBHOOK_URL: {'✅ 설정됨' if SLACK_WEBHOOK else '❌ 설정되지 않음'}")
+    print(f"  - DROPBOX_ACCESS_TOKEN: {'✅ 설정됨' if DROPBOX_ACCESS_TOKEN else '❌ 설정되지 않음'}")
+    print(f"  - GOOGLE_SHEETS_CREDENTIALS: {'✅ 설정됨' if GOOGLE_SHEETS_CREDENTIALS else '❌ 설정되지 않음'}")
+    print()
+    
     # 1. 스크래핑 실행
+    print("📊 1단계: 올리브영 랭킹 스크래핑 시작...")
     df = await scrape_oliveyoung()
     
     if df.empty:
         print("❌ 데이터 수집에 실패했습니다.")
         return
     
+    print(f"✅ 스크래핑 완료: {len(df)}개 상품 수집\n")
+    
     # 2. 파일 저장
+    print("💾 2단계: 파일 저장 시작...")
     json_file, csv_file = save_to_files(df)
+    print(f"✅ 파일 저장 완료: {json_file}, {csv_file}\n")
     
     # 3. 드롭박스 업로드
+    print("☁️ 3단계: 드롭박스 업로드 시작...")
     if DROPBOX_ACCESS_TOKEN:
-        upload_to_dropbox(json_file)
-        upload_to_dropbox(csv_file)
+        print("  - JSON 파일 업로드 중...")
+        json_upload_success = upload_to_dropbox(json_file)
+        print("  - CSV 파일 업로드 중...")
+        csv_upload_success = upload_to_dropbox(csv_file)
+        
+        if json_upload_success and csv_upload_success:
+            print("✅ 드롭박스 업로드 완료")
+        else:
+            print("⚠️ 드롭박스 업로드 일부 실패")
     else:
         print("💡 드롭박스 연동을 원한다면 DROPBOX_ACCESS_TOKEN 환경변수를 설정하세요.")
+    print()
     
     # 4. Google Sheets 업로드
+    print("📊 4단계: Google Sheets 업로드 시작...")
     if GOOGLE_SHEETS_CREDENTIALS:
-        upload_to_google_sheets(df)
+        sheets_success = upload_to_google_sheets(df)
+        if sheets_success:
+            print("✅ Google Sheets 업로드 완료")
+        else:
+            print("⚠️ Google Sheets 업로드 실패")
     else:
         print("💡 Google Sheets 연동을 원한다면 GOOGLE_SHEETS_CREDENTIALS 환경변수를 설정하세요.")
+    print()
     
     # 5. Slack 전송
+    print("💬 5단계: Slack 메시지 전송 시작...")
     if SLACK_WEBHOOK:
-        send_to_slack(df)
+        slack_success = send_to_slack(df)
+        if slack_success:
+            print("✅ Slack 메시지 전송 완료")
+        else:
+            print("⚠️ Slack 메시지 전송 실패")
     else:
         print("💡 Slack 연동을 원한다면 SLACK_WEBHOOK_URL 환경변수를 설정하세요.")
+    print()
     
     # 6. 결과 요약
-    print(f"\n🎉 스크래핑 완료!")
+    print("="*60)
+    print("🎉 스크래핑 작업 완료 요약")
+    print("="*60)
     print(f"📊 수집된 상품: {len(df)}개")
     print(f"📁 저장된 파일: {json_file}, {csv_file}")
     
+    # 각 서비스별 상태 표시
     if DROPBOX_ACCESS_TOKEN:
-        print("☁️ 드롭박스: 업로드 완료")
+        print("☁️ 드롭박스: ✅ 연동됨")
+    else:
+        print("☁️ 드롭박스: ❌ 연동되지 않음")
+        
     if GOOGLE_SHEETS_CREDENTIALS:
-        print("📊 Google Sheets: 업로드 완료")
+        print("📊 Google Sheets: ✅ 연동됨")
+    else:
+        print("📊 Google Sheets: ❌ 연동되지 않음")
+        
     if SLACK_WEBHOOK:
-        print("💬 Slack: 메시지 전송 완료")
+        print("💬 Slack: ✅ 연동됨")
+    else:
+        print("💬 Slack: ❌ 연동되지 않음")
+    
+    print("="*60)
 
 if __name__ == "__main__":
     try:
