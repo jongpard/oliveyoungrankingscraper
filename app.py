@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # app.py — Dropbox Refresh Token 업로드 + 급하락 분석 + 14:01 KST 고정 + 브랜드중복 제거
+#          Playwright fallback 안정화(네트워크아이들 제거, 다중 URL/리트라이, 셀렉터 대기, 스텔스, 아티팩트 덤프)
 
 import os
 import re
@@ -15,9 +16,9 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from bs4 import BeautifulSoup
 
-# ---------------- Playwright (옵션: HTTP 실패 시만)
+# ---------------- Playwright (옵션)
 try:
-    from playwright.sync_api import sync_playwright
+    from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
     PLAYWRIGHT_AVAILABLE = True
 except Exception:
     PLAYWRIGHT_AVAILABLE = False
@@ -29,6 +30,7 @@ DROPBOX_APP_SECRET = os.environ.get("DROPBOX_APP_SECRET", "").strip()
 DROPBOX_REFRESH_TOKEN = os.environ.get("DROPBOX_REFRESH_TOKEN", "").strip()
 
 OUT_DIR = "rankings"
+ART_DIR = "artifacts"
 DROPBOX_DIR = "/rankings"
 MAX_ITEMS = 100
 
@@ -43,7 +45,8 @@ def make_session():
     retries = Retry(total=3, backoff_factor=1, status_forcelist=[429, 500, 502, 503, 504])
     s.mount("https://", HTTPAdapter(max_retries=retries))
     s.headers.update({
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36",
+        "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                       "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"),
         "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
         "Referer": "https://www.oliveyoung.co.kr/",
     })
@@ -53,8 +56,8 @@ def make_session():
 def clean_title(raw: str) -> str:
     if not raw: return ""
     s = raw.strip()
-    s = re.sub(r'^\s*(?:\[[^\]]*\]\s*)+', '', s)                       # [ ... ] 제거
-    s = re.sub(r'^\s*([^|\n]{1,40}\|\s*)+', '', s)                     # 태그|태그|... 제거
+    s = re.sub(r'^\s*(?:\[[^\]]*\]\s*)+', '', s)
+    s = re.sub(r'^\s*([^|\n]{1,40}\|\s*)+', '', s)
     s = re.sub(r'^\s*(리뷰 이벤트|PICK|오특|이벤트|특가|[^\s]*PICK)\s*[:\-–—]?\s*', '', s, flags=re.IGNORECASE)
     return re.sub(r'\s+', ' ', s).strip()
 
@@ -121,8 +124,10 @@ def try_http_candidates():
             text = r.text or ""
             ct = r.headers.get("Content-Type", "")
             if "application/json" in ct or text.strip().startswith("{") or text.strip().startswith("["):
-                try: data = r.json()
-                except: data = None
+                try:
+                    data = r.json()
+                except Exception:
+                    data = None
                 if isinstance(data, dict):
                     for k in ["BestProductList", "list", "rows", "items", "bestList", "result"]:
                         if k in data and isinstance(data[k], list) and data[k]:
@@ -145,26 +150,109 @@ def try_http_candidates():
             logging.exception("HTTP candidate error: %s %s", url, e)
     return None, None
 
-def try_playwright_render(url="https://www.oliveyoung.co.kr/store/main/getBestList.do"):
+def _dump_artifacts(page, tag):
+    try:
+        os.makedirs(ART_DIR, exist_ok=True)
+        page.screenshot(path=f"{ART_DIR}/{tag}.png", full_page=True)
+        with open(f"{ART_DIR}/{tag}.html", "w", encoding="utf-8") as f:
+            f.write(page.content())
+    except Exception:
+        pass
+
+def try_playwright_render(urls=None, max_retries=2):
+    """더 튼튼한 렌더: networkidle 미사용, 셀렉터 대기, 다중 URL/리트라이, 스텔스/헤더/타임존."""
     if not PLAYWRIGHT_AVAILABLE:
         logging.warning("Playwright not available."); return None, None
+
+    urls = urls or [
+        "https://www.oliveyoung.co.kr/store/main/getBest.do",        # 메인 베스트
+        "https://www.oliveyoung.co.kr/store/main/getBestList.do",    # 프래그먼트
+    ]
     try:
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=True, args=["--no-sandbox", "--disable-dev-shm-usage"])
-            context = browser.new_context(
-                user_agent=("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36"),
-                locale="ko-KR"
+            context = p.chromium.new_context(
+                user_agent=("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                            "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"),
+                locale="ko-KR",
+                timezone_id="Asia/Seoul",
+                extra_http_headers={"Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7"},
+                viewport={"width": 1440, "height": 900},
             )
+            # 간단 스텔스
+            context.add_init_script("""() => {
+                Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+                Object.defineProperty(navigator, 'languages', { get: () => ['ko-KR','ko','en-US','en'] });
+                Object.defineProperty(navigator, 'plugins', { get: () => [1,2,3] });
+            }""")
+
             page = context.new_page()
-            logging.info("Playwright goto: %s", url)
-            page.goto(url, wait_until="networkidle", timeout=60000)
-            page.wait_for_timeout(2500)
-            html = page.content()
-            items = parse_html_products(html)
-            browser.close()
-            return items, html[:800]
+            # 리소스 절감(차단)
+            page.route("**/*", lambda route: route.abort() if route.request.resource_type in {"image","font","media"} else route.continue_())
+
+            candidate_selectors = [
+                "ul.cate_prd_list li",
+                "ul.prd_list li",
+                ".cate_prd_list li",
+                ".ranking_list li",
+                ".rank_item",
+            ]
+
+            last_err = None
+            for attempt in range(1, max_retries + 1):
+                for u in urls:
+                    try:
+                        logging.info("Playwright goto (try %d): %s", attempt, u)
+                        # domcontentloaded까지만 대기 (networkidle은 보안 스크립트 때문에 잘 안 끝남)
+                        page.goto(u, wait_until="domcontentloaded", timeout=45000)
+                        # 쿠키/레이어 닫기 시도
+                        for sel in ["button:has-text('동의')", "button:has-text('확인')", "button:has-text('닫기')", ".btnClose", ".btn-close", "#chkToday"]:
+                            try:
+                                if page.locator(sel).count() > 0:
+                                    page.locator(sel).first.click(timeout=800)
+                            except Exception:
+                                pass
+                        page.wait_for_timeout(600)
+
+                        # 셀렉터 대기 (붙기/보이기 중 아무거나)
+                        root_combined = ", ".join([s.replace(" li", "") for s in candidate_selectors])
+                        try:
+                            page.locator(root_combined).first.wait_for(state="attached", timeout=15000)
+                        except PWTimeout:
+                            pass
+                        try:
+                            page.locator(root_combined).first.wait_for(state="visible", timeout=15000)
+                        except PWTimeout:
+                            pass
+
+                        # li 개수 조건(최소 5개)
+                        page.wait_for_function(
+                            """(sels)=>{for (const s of sels){const n=document.querySelectorAll(s).length;if(n>=5)return true;}return false;}""",
+                            arg=candidate_selectors, timeout=20000
+                        )
+
+                        html = page.content()
+                        items = parse_html_products(html)
+                        if items:
+                            context.close(); browser.close()
+                            return items, html[:800]
+                        else:
+                            _dump_artifacts(page, f"no_items_try{attempt}")
+                            last_err = RuntimeError("리스트 파싱 실패")
+                    except Exception as e:
+                        last_err = e
+                        _dump_artifacts(page, f"fail_try{attempt}")
+                        # 살짝 쉬고 다음 URL/다음 시도
+                        try: page.wait_for_timeout(800)
+                        except Exception: pass
+                        continue
+
+            context.close(); browser.close()
+            if last_err:
+                logging.error("Playwright render error: %s", last_err)
+            return None, None
     except Exception as e:
-        logging.exception("Playwright render error: %s", e)
+        logging.exception("Playwright outer error: %s", e)
         return None, None
 
 def fill_ranks(items):
@@ -242,23 +330,18 @@ def analyze_trends(today_items, prev_items):
     firsts = [t for t in trends if t.get("prev_rank") is None]
     return movers_up, firsts, movers_down
 
-# ---------------- 표시용(브랜드 중복 제거)
+# ---------------- 표시(브랜드 중복 제거)
 def _norm(s: str) -> str:
     if not s: return ""
     s = s.lower()
-    s = re.sub(r'[\s\[\]\(\)\-–—·|:,/\\]+', '', s)  # 공백/구두점 제거
+    s = re.sub(r'[\s\[\]\(\)\-–—·|:,/\\]+', '', s)
     return s
 
 def format_title_for_slack(brand: str, name: str) -> str:
-    """제품명에 이미 브랜드가 선두에 있으면 중복 제거."""
-    b = (brand or "").strip()
-    n = (name or "").strip()
+    b = (brand or "").strip(); n = (name or "").strip()
     if not b: return n
-    nb = _norm(b)
-    nn = _norm(n)
-    # 이름 맨 앞 토큰(브랜드)이 이미 포함된 경우
-    if nn.startswith(nb):
-        return n  # 이미 포함 → 그대로
+    if _norm(n).startswith(_norm(b)):  # 제품명 앞에 이미 브랜드가 있으면 중복 제거
+        return n
     return f"{b} {n}"
 
 # ---------------- Slack
