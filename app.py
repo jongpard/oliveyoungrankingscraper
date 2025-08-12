@@ -1,13 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# app.py — OAuth(사용자 계정) 기반 GDrive 업로드 전용
+# app.py — OAuth(사용자 계정) 기반 GDrive 업로드 + 할인율 계산/표시
 
 import os
 import re
 import json
-import time
 import logging
-import base64
 from io import BytesIO, StringIO
 from datetime import datetime, timedelta, timezone
 
@@ -16,7 +14,7 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from bs4 import BeautifulSoup
 
-# Playwright (옵션): HTTP가 막히면 폴백
+# (optional) Playwright fallback
 try:
     from playwright.sync_api import sync_playwright
     PLAYWRIGHT_AVAILABLE = True
@@ -29,15 +27,12 @@ from googleapiclient.http import MediaIoBaseUpload, MediaIoBaseDownload
 from google.oauth2.credentials import Credentials as UserCredentials
 from google.auth.transport.requests import Request as GoogleRequest
 
-# ----------------------------- 설정(환경변수)
+# ---------------- 설정(ENV)
 SLACK_WEBHOOK = os.environ.get("SLACK_WEBHOOK_URL", "").strip()
 
-# OAuth (반드시 세팅)
 GOOGLE_CLIENT_ID = os.environ.get("GOOGLE_CLIENT_ID", "").strip()
 GOOGLE_CLIENT_SECRET = os.environ.get("GOOGLE_CLIENT_SECRET", "").strip()
 GOOGLE_REFRESH_TOKEN = os.environ.get("GOOGLE_REFRESH_TOKEN", "").strip()
-
-# 업로드 대상 폴더
 GDRIVE_FOLDER_ID = os.environ.get("GDRIVE_FOLDER_ID", "").strip()
 
 OUT_DIR = "rankings"
@@ -45,9 +40,9 @@ MAX_ITEMS = 100
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s")
 
-# ----------------------------- 공통 헬퍼
+
+# ---------------- 유틸
 def kst_now():
-    # KST(UTC+9)
     return datetime.now(timezone.utc) + timedelta(hours=9)
 
 def make_session():
@@ -61,15 +56,34 @@ def make_session():
     })
     return s
 
-# ----------------------------- 파싱/정제
+_won_pat = re.compile(r"[\d,]+")
+
+def parse_won_to_int(s: str | None) -> int | None:
+    if not s:
+        return None
+    m = _won_pat.search(s)
+    if not m:
+        return None
+    try:
+        return int(m.group(0).replace(",", ""))
+    except Exception:
+        return None
+
+def fmt_price_with_discount(sale: int | None, disc_pct: int | None) -> str:
+    if not sale:
+        return ""
+    if disc_pct is None:
+        return f"{sale:,}원"
+    return f"{sale:,}원 ({disc_pct}%)"
+
+
+# ---------------- 파싱/정제
 def clean_title(raw: str) -> str:
     if not raw:
         return ""
     s = raw.strip()
-    # 맨 앞 대괄호 태그들 제거
-    s = re.sub(r'^\s*(?:\[[^\]]*\]\s*)+', '', s)
-    # 프로모션 토막 제거 ("PICK |", "리뷰", 짧은 태그들 등)
-    s = re.sub(r'^\s*([^|\n]{1,40}\|\s*)+', '', s)
+    s = re.sub(r'^\s*(?:\[[^\]]*\]\s*)+', '', s)  # [ ... ] 제거
+    s = re.sub(r'^\s*([^|\n]{1,40}\|\s*)+', '', s)  # 앞단 프로모션 토막 제거
     s = re.sub(r'^\s*(리뷰 이벤트|PICK|오특|이벤트|특가|[^\s]*PICK)\s*[:\-–—]?\s*', '', s, flags=re.IGNORECASE)
     s = re.sub(r'\s+', ' ', s).strip()
     return s
@@ -81,9 +95,7 @@ def extract_brand_from_name(name: str) -> str:
     if parts:
         cand = parts[0]
         if re.match(r'^\d|\+|세트|기획', cand):
-            if len(parts) > 1:
-                return parts[1]
-            return cand
+            return parts[1] if len(parts) > 1 else cand
         return cand
     return name
 
@@ -93,8 +105,6 @@ def parse_html_products(html: str):
         "ul.cate_prd_list li",
         "ul.prd_list li",
         ".cate_prd_list li",
-        ".prd_info",
-        ".prd_box",
         ".ranking_list li",
         ".rank_item",
     ]
@@ -103,9 +113,10 @@ def parse_html_products(html: str):
         els = soup.select(sel)
         if not els:
             continue
-        for _, el in enumerate(els, start=1):
+        for el in els:
             if len(results) >= MAX_ITEMS:
                 break
+
             # 이름
             name_node = None
             for ns in [".tx_name", ".prd_name .tx_name", ".prd_name", ".prd_tit", "a"]:
@@ -118,9 +129,14 @@ def parse_html_products(html: str):
             raw_name = name_node.get_text(" ", strip=True)
             cleaned = clean_title(raw_name)
 
-            # 가격
-            price_node = el.select_one(".tx_cur .tx_num") or el.select_one(".tx_cur") or el.select_one(".prd_price .tx_num") or el.select_one(".prd_price")
-            price = price_node.get_text(strip=True) if price_node else ""
+            # 가격: 올영 구조(예시)
+            # - 할인가: .tx_cur .tx_num / .tx_cur
+            # - 정가:   .tx_org .tx_num / .tx_org
+            sale_node = el.select_one(".tx_cur .tx_num") or el.select_one(".tx_cur")
+            org_node  = el.select_one(".tx_org .tx_num") or el.select_one(".tx_org")
+
+            sale_price = parse_won_to_int(sale_node.get_text(strip=True) if sale_node else "")
+            original_price = parse_won_to_int(org_node.get_text(strip=True) if org_node else "")
 
             # 브랜드
             brand_node = el.select_one(".tx_brand") or el.select_one(".brand")
@@ -132,13 +148,20 @@ def parse_html_products(html: str):
             if href and href.startswith("/"):
                 href = "https://www.oliveyoung.co.kr" + href
 
+            # 할인율 계산
+            disc_pct = None
+            if original_price and sale_price and original_price > sale_price:
+                disc_pct = int((original_price - sale_price) / original_price * 100)
+
             results.append({
                 "raw_name": raw_name,
                 "name": cleaned,
                 "brand": brand,
-                "price": price,
                 "url": href,
-                "rank": None
+                "original_price": original_price,
+                "sale_price": sale_price,
+                "discount_pct": disc_pct,
+                "rank": None,
             })
         if results:
             logging.info("parse_html_products: %s -> %d개", sel, len(results))
@@ -163,7 +186,7 @@ def try_http_candidates():
             ct = r.headers.get("Content-Type","")
             text = r.text or ""
 
-            # JSON 시도
+            # JSON 모양이면 필드 매핑 시도
             if "application/json" in ct or text.strip().startswith("{") or text.strip().startswith("["):
                 try:
                     data = r.json()
@@ -175,19 +198,32 @@ def try_http_candidates():
                             out = []
                             for it in data[k][:MAX_ITEMS]:
                                 name_val = it.get("prdNm") or it.get("prodName") or it.get("goodsNm") or it.get("name")
-                                price_val = it.get("price") or it.get("salePrice") or it.get("onlinePrice")
                                 brand_val = it.get("brandNm") or it.get("brand")
                                 url_val = it.get("goodsUrl") or it.get("prdUrl") or it.get("url")
+
+                                sale_val = it.get("price") or it.get("salePrice") or it.get("onlinePrice") or it.get("finalPrice")
+                                org_val  = it.get("orgPrice") or it.get("originalPrice") or it.get("listPrice")
+                                sale_price = parse_won_to_int(str(sale_val) if sale_val is not None else "")
+                                original_price = parse_won_to_int(str(org_val) if org_val is not None else "")
+
                                 if isinstance(url_val, str) and url_val.startswith("/"):
                                     url_val = "https://www.oliveyoung.co.kr" + url_val
                                 cleaned = clean_title(name_val or "")
+                                brand = brand_val or extract_brand_from_name(cleaned)
+
+                                disc_pct = None
+                                if original_price and sale_price and original_price > sale_price:
+                                    disc_pct = int((original_price - sale_price) / original_price * 100)
+
                                 out.append({
                                     "raw_name": name_val,
                                     "name": cleaned,
-                                    "brand": brand_val or extract_brand_from_name(cleaned),
-                                    "price": str(price_val or ""),
+                                    "brand": brand,
                                     "url": url_val,
-                                    "rank": None
+                                    "original_price": original_price,
+                                    "sale_price": sale_price,
+                                    "discount_pct": disc_pct,
+                                    "rank": None,
                                 })
                             if out:
                                 logging.info("HTTP JSON parse via key %s -> %d개", k, len(out))
@@ -239,9 +275,9 @@ def fill_ranks_and_fix(items):
             break
     return out
 
-# ----------------------------- Google Drive (OAuth)
+
+# ---------------- Google Drive (OAuth)
 def build_drive_service_oauth():
-    """사용자 OAuth(refresh token) 기반 Drive 서비스 생성"""
     if not (GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET and GOOGLE_REFRESH_TOKEN):
         logging.warning("OAuth env 미설정 (GOOGLE_CLIENT_ID/SECRET/REFRESH_TOKEN)")
         return None
@@ -263,7 +299,6 @@ def build_drive_service_oauth():
 
 def upload_csv_to_drive(service, csv_bytes, filename, folder_id=None):
     if not service:
-        logging.warning("Drive service 없음 → 업로드 스킵")
         return None
     try:
         media = MediaIoBaseUpload(BytesIO(csv_bytes), mimetype="text/csv", resumable=False)
@@ -302,7 +337,8 @@ def download_file_from_drive(service, file_id):
         logging.exception("download_file_from_drive error: %s", e)
         return None
 
-# ----------------------------- 분석(급상승/급하락/신규)
+
+# ---------------- 분석(급상승/급하락/신규)
 def analyze_trends(today_items, prev_items):
     prev_map = {}
     for p in (prev_items or []):
@@ -314,7 +350,7 @@ def analyze_trends(today_items, prev_items):
         key = it.get("name") or it.get("raw_name")
         prev_rank = prev_map.get(key)
         if prev_rank:
-            change = prev_rank - it['rank']  # +면 상승, -면 하락
+            change = prev_rank - it['rank']
             trends.append({
                 "name": key,
                 "brand": it.get("brand"),
@@ -334,33 +370,28 @@ def analyze_trends(today_items, prev_items):
             })
 
     movers = [t for t in trends if t.get("prev_rank")]
-    up = sorted(movers, key=lambda x: x["change"], reverse=True)   # 급상승
-    down = sorted(movers, key=lambda x: x["change"])               # 급하락(가장 음수)
-    firsts = [t for t in trends if t.get("prev_rank") is None]     # 신규
-
+    up = sorted(movers, key=lambda x: x["change"], reverse=True)
+    down = sorted(movers, key=lambda x: x["change"])
+    firsts = [t for t in trends if t.get("prev_rank") is None]
     return up, down, firsts
 
-# ----------------------------- Slack
+
+# ---------------- Slack
 def send_slack_text(text):
     if not SLACK_WEBHOOK:
         logging.warning("No SLACK_WEBHOOK configured.")
         return False
     try:
         res = requests.post(SLACK_WEBHOOK, json={"text": text}, timeout=10)
-        if res.status_code // 100 == 2:
-            logging.info("Slack sent")
-            return True
-        logging.warning("Slack returned %s: %s", res.status_code, res.text[:200])
-        return False
-    except Exception as e:
-        logging.exception("Slack send error: %s", e)
+        return res.status_code // 100 == 2
+    except Exception:
         return False
 
-# ----------------------------- 메인
+
+# ---------------- 메인
 def main():
-    # 빌드 배너 (KST 기준 날짜 표시)
     today_kst = kst_now().date()
-    logging.info("Build: oy-app gdrive-only %s", today_kst.isoformat())
+    logging.info("Build: oy-app gdrive+discount %s", today_kst.isoformat())
 
     logging.info("Start scraping")
     items, sample = try_http_candidates()
@@ -369,51 +400,57 @@ def main():
         items, sample = try_playwright_render()
     if not items:
         logging.error("Scraping failed. sample head: %s", (sample or "")[:500])
-        send_slack_text(f"❌ OliveYoung scraping failed. sample:\n{(sample or '')[:800]}")
+        send_slack_text(f"❌ OliveYoung scraping failed.\n{(sample or '')[:800]}")
         return 1
 
     if len(items) > MAX_ITEMS:
         items = items[:MAX_ITEMS]
     items_filled = fill_ranks_and_fix(items)
 
-    # CSV 생성
+    # CSV 생성 (정가/할인가/할인율 포함)
     os.makedirs(OUT_DIR, exist_ok=True)
     fname = f"올리브영_랭킹_{today_kst.isoformat()}.csv"
-    header = ["rank","brand","name","price","url","raw_name"]
+    header = ["rank","brand","name","original_price","sale_price","discount_pct","url","raw_name"]
     lines = [",".join(header)]
 
     def q(s):
-        if s is None:
-            return ""
+        if s is None: return ""
         s = str(s).replace('"','""')
-        if ',' in s or '\n' in s or '"' in s:
-            return f'"{s}"'
+        if any(c in s for c in [',','\n','"']): return f'"{s}"'
         return s
 
     for it in items_filled:
-        row = [q(it.get("rank")), q(it.get("brand")), q(it.get("name")), q(it.get("price")), q(it.get("url")), q(it.get("raw_name"))]
+        row = [
+            q(it.get("rank")),
+            q(it.get("brand")),
+            q(it.get("name")),
+            q(it.get("original_price") if it.get("original_price") is not None else ""),
+            q(it.get("sale_price") if it.get("sale_price") is not None else ""),
+            q(it.get("discount_pct") if it.get("discount_pct") is not None else ""),
+            q(it.get("url")),
+            q(it.get("raw_name")),
+        ]
         lines.append(",".join(row))
     csv_data = ("\n".join(lines)).encode("utf-8")
 
-    # 로컬 백업
+    # 로컬 저장
     path = os.path.join(OUT_DIR, fname)
     with open(path, "wb") as f:
         f.write(csv_data)
     logging.info("Saved CSV locally: %s", path)
 
-    # Google Drive 업로드 (OAuth)
+    # GDrive 업로드
     drive_service = build_drive_service_oauth()
     if drive_service and GDRIVE_FOLDER_ID:
         upload_csv_to_drive(drive_service, csv_data, fname, folder_id=GDRIVE_FOLDER_ID)
     else:
         logging.warning("OAuth Drive 미설정 또는 폴더ID 누락 -> 업로드 스킵")
 
-    # 전일 파일 비교(있으면)
+    # 전일 비교
     prev_items = None
     if drive_service and GDRIVE_FOLDER_ID:
         latest = find_latest_csv_in_drive(drive_service, GDRIVE_FOLDER_ID)
         if latest and latest.get("name") != fname:
-            logging.info("Found previous file %s - downloading", latest.get("name"))
             prev_csv_text = download_file_from_drive(drive_service, latest.get("id"))
             if prev_csv_text:
                 prev_items = []
@@ -431,59 +468,61 @@ def main():
 
     up, down, firsts = analyze_trends(items_filled, prev_items or [])
 
-    # Slack 메시지 구성 (상위 10, 급상승/급하락/신규)
+    # Slack 메시지 (가격: "9,950원 (50%)" 형태, 소수점 없음)
     top10 = items_filled[:10]
-    msg = []
     now_kst = kst_now().strftime("%Y-%m-%d %H:%M KST")
-    msg.append(f"📊 OliveYoung Total Ranking ({now_kst})")
+    lines = [f"📊 OliveYoung Total Ranking ({now_kst})"]
     for it in top10:
         rank = it.get("rank")
         brand = it.get("brand") or ""
         name = it.get("name") or ""
-        price = it.get("price") or ""
+        sale = it.get("sale_price")
+        pct = it.get("discount_pct")
+        price_str = fmt_price_with_discount(sale, pct)
         url = it.get("url")
         if url:
-            msg.append(f"{rank}. <{url}|{brand} {name}> — {price}")
+            lines.append(f"{rank}. <{url}|{brand} {name}> — {price_str}")
         else:
-            msg.append(f"{rank}. {brand} {name} — {price}")
+            lines.append(f"{rank}. {brand} {name} — {price_str}")
 
-    msg.append("")
-    msg.append("🔥 급상승 TOP3")
+    lines.append("")
+    lines.append("🔥 급상승 TOP3")
     if up:
         for m in up[:3]:
             change = m["prev_rank"] - m["rank"]
-            msg.append(f"- {m.get('brand')}: {m.get('prev_rank')}위 → {m.get('rank')}위 (+{change})")
+            lines.append(f"- {m.get('brand')}: {m.get('prev_rank')}위 → {m.get('rank')}위 (+{change})")
             sample = m.get("sample_product") or m.get("name")
             if sample:
-                msg.append(f"  ▶ {sample}")
+                lines.append(f"  ▶ {sample}")
     else:
-        msg.append("- (이전 데이터 없음)")
+        lines.append("- (이전 데이터 없음)")
 
-    msg.append("")
-    msg.append("📉 급하락 TOP3")
+    lines.append("")
+    lines.append("📉 급하락 TOP3")
     downs = [m for m in down if m["change"] < 0][:3]
     if downs:
         for m in downs:
             change = m["rank"] - m["prev_rank"]
-            msg.append(f"- {m.get('brand')}: {m.get('prev_rank')}위 → {m.get('rank')}위 (-{change})")
+            lines.append(f"- {m.get('brand')}: {m.get('prev_rank')}위 → {m.get('rank')}위 (-{change})")
             sample = m.get("sample_product") or m.get("name")
             if sample:
-                msg.append(f"  ▶ {sample}")
+                lines.append(f"  ▶ {sample}")
     else:
-        msg.append("- (이전 데이터 없음)")
+        lines.append("- (이전 데이터 없음)")
 
-    msg.append("")
-    msg.append("🆕 첫 등장/주목 신상품")
+    lines.append("")
+    lines.append("🆕 첫 등장/주목 신상품")
     if firsts:
         for f in firsts[:3]:
-            msg.append(f"- {f.get('brand')}: 첫 등장 {f.get('rank')}위")
-            msg.append(f"  ▶ {f.get('sample_product')}")
+            lines.append(f"- {f.get('brand')}: 첫 등장 {f.get('rank')}위")
+            lines.append(f"  ▶ {f.get('sample_product')}")
     else:
-        msg.append("- (신규 없음)")
+        lines.append("- (신규 없음)")
 
-    send_slack_text("\n".join(msg))
+    send_slack_text("\n".join(lines))
     logging.info("Done.")
     return 0
+
 
 if __name__ == "__main__":
     exit(main())
