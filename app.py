@@ -48,7 +48,15 @@ def scrape_oliveyoung_ranking(category_no):
     url = f"https://www.oliveyoung.co.kr/store/main/getBestList.do?dispCatNo={category_no}"
     print(f"🔍 다음 URL에서 랭킹 수집을 시작합니다: {url}")
     
-    response = requests.get(url)
+    # --- ✨ 여기를 수정했습니다! ---
+    # 실제 브라우저처럼 보이기 위한 User-Agent 헤더 정보 추가
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+    }
+    # requests.get() 호출 시 headers=headers 추가
+    response = requests.get(url, headers=headers)
+    # --- ✨ 수정 끝 ---
+
     if response.status_code != 200:
         raise Exception(f"올리브영 서버 응답 에러: Status Code {response.status_code}")
 
@@ -90,7 +98,6 @@ def upload_to_drive(file_path, folder_id):
         raise ValueError("구글 드라이브 폴더 ID(GDRIVE_FOLDER_ID)가 없습니다.")
 
     try:
-        # Base64로 인코딩된 JSON 키를 디코딩하여 사용
         creds_json = json.loads(base64.b64decode(GDRIVE_SA_JSON_B64).decode('utf-8'))
         creds = Credentials.from_service_account_info(
             creds_json,
@@ -111,7 +118,7 @@ def upload_to_drive(file_path, folder_id):
             body=file_metadata,
             media_body=media,
             fields="id",
-            supportsAllDrives=True  # 공유 드라이브 지원 옵션
+            supportsAllDrives=True
         ).execute()
         
         print(f"✅ 파일 업로드 성공! 파일 ID: {file.get('id')}")
@@ -119,12 +126,10 @@ def upload_to_drive(file_path, folder_id):
         
     except HttpError as error:
         print(f"❌ 구글 드라이브 업로드 중 HTTP 에러 발생: {error}")
-        # 에러 메시지를 재발생시켜 main 블록에서 처리하도록 함
         raise error
     except Exception as e:
         print(f"❌ 구글 드라이브 업로드 중 예기치 않은 에러 발생: {e}")
         raise e
-
 
 if __name__ == "__main__":
     today_str = datetime.now().strftime("%Y-%m-%d")
@@ -133,17 +138,12 @@ if __name__ == "__main__":
     csv_path = os.path.join(csv_dir, f"oliveyoung_{today_str}.csv")
 
     try:
-        # 1. 랭킹 데이터 스크랩
         df = scrape_oliveyoung_ranking(CATEGORY_NO)
-        
-        # 2. CSV 파일로 저장
         df.to_csv(csv_path, index=False, encoding='utf-8-sig')
         print(f"✅ CSV 저장 완료: {csv_path}")
 
-        # 3. 구글 드라이브에 업로드
         upload_to_drive(csv_path, GDRIVE_FOLDER_ID)
         
-        # 4. 성공 알림 슬랙으로 전송
         top_3_items = "\n".join([f"  {row['순위']}위: {row['브랜드']} - {row['제품명']}" for _, row in df.head(3).iterrows()])
         success_message = (
             f"🎉 [성공] 올리브영 랭킹({today_str}) 수집 및 구글 드라이브 업로드 완료!\n\n"
@@ -154,7 +154,6 @@ if __name__ == "__main__":
         send_slack_notification(success_message, is_successful=True)
 
     except Exception as e:
-        # 에러 발생 시 실패 알림 전송
         error_message = f"🚨 [실패] 올리브영 랭킹 수집 자동화 중 에러가 발생했습니다.\n\n- 날짜: {today_str}\n- 에러 내용: `{str(e)}`"
         print(error_message)
         send_slack_notification(error_message, is_successful=False)
