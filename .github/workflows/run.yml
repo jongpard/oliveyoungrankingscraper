@@ -17,12 +17,18 @@ jobs:
           python -m pip install --upgrade pip
           pip install requests beautifulsoup4 urllib3 playwright google-api-python-client google-auth google-auth-httplib2 google-auth-oauthlib
           python -m playwright install chromium
-      - name: Run app
-        run: python app.py
 - name: Debug env presence
   run: |
     python - << 'PY'
     import os
     for k in ["GDRIVE_SA_JSON_B64","GDRIVE_FOLDER_ID"]:
-        print(k, "=", "SET" if os.getenv(k) else "MISSING")
+        v = os.getenv(k)
+        print(k, "=", "SET" if v else "MISSING", "| length =", (len(v) if v else 0))
     PY
+
+- name: Run app
+  run: python app.py
+
+      
+      - name: Run app
+        run: python app.py
