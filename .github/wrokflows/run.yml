@@ -19,3 +19,10 @@ jobs:
           python -m playwright install chromium
       - name: Run app
         run: python app.py
+- name: Debug env presence
+  run: |
+    python - << 'PY'
+    import os
+    for k in ["GDRIVE_SA_JSON_B64","GDRIVE_FOLDER_ID"]:
+        print(k, "=", "SET" if os.getenv(k) else "MISSING")
+    PY
