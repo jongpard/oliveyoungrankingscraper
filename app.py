@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # app.py — Dropbox Refresh Token 업로드 + 급하락 분석 + 14:01 KST 고정 + 브랜드중복 제거
-#          Playwright fallback 안정화(네트워크아이들 제거, 다중 URL/리트라이, 셀렉터 대기, 스텔스, 아티팩트 덤프)
+#          Playwright fallback 안정화(오타 fix: browser.new_context)
 
 import os
 import re
@@ -160,18 +160,19 @@ def _dump_artifacts(page, tag):
         pass
 
 def try_playwright_render(urls=None, max_retries=2):
-    """더 튼튼한 렌더: networkidle 미사용, 셀렉터 대기, 다중 URL/리트라이, 스텔스/헤더/타임존."""
+    """더 튼튼한 렌더: domcontentloaded + 셀렉터 대기, 다중 URL/리트라이, 스텔스/헤더/타임존."""
     if not PLAYWRIGHT_AVAILABLE:
         logging.warning("Playwright not available."); return None, None
 
     urls = urls or [
-        "https://www.oliveyoung.co.kr/store/main/getBest.do",        # 메인 베스트
-        "https://www.oliveyoung.co.kr/store/main/getBestList.do",    # 프래그먼트
+        "https://www.oliveyoung.co.kr/store/main/getBest.do",
+        "https://www.oliveyoung.co.kr/store/main/getBestList.do",
     ]
     try:
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=True, args=["--no-sandbox", "--disable-dev-shm-usage"])
-            context = p.chromium.new_context(
+            # ✅ FIX: BrowserType가 아니라 Browser 객체에서 new_context 호출
+            context = browser.new_context(
                 user_agent=("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
                             "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"),
                 locale="ko-KR",
@@ -203,8 +204,8 @@ def try_playwright_render(urls=None, max_retries=2):
                 for u in urls:
                     try:
                         logging.info("Playwright goto (try %d): %s", attempt, u)
-                        # domcontentloaded까지만 대기 (networkidle은 보안 스크립트 때문에 잘 안 끝남)
                         page.goto(u, wait_until="domcontentloaded", timeout=45000)
+
                         # 쿠키/레이어 닫기 시도
                         for sel in ["button:has-text('동의')", "button:has-text('확인')", "button:has-text('닫기')", ".btnClose", ".btn-close", "#chkToday"]:
                             try:
@@ -214,7 +215,7 @@ def try_playwright_render(urls=None, max_retries=2):
                                 pass
                         page.wait_for_timeout(600)
 
-                        # 셀렉터 대기 (붙기/보이기 중 아무거나)
+                        # 셀렉터 대기
                         root_combined = ", ".join([s.replace(" li", "") for s in candidate_selectors])
                         try:
                             page.locator(root_combined).first.wait_for(state="attached", timeout=15000)
@@ -242,7 +243,6 @@ def try_playwright_render(urls=None, max_retries=2):
                     except Exception as e:
                         last_err = e
                         _dump_artifacts(page, f"fail_try{attempt}")
-                        # 살짝 쉬고 다음 URL/다음 시도
                         try: page.wait_for_timeout(800)
                         except Exception: pass
                         continue
@@ -340,7 +340,7 @@ def _norm(s: str) -> str:
 def format_title_for_slack(brand: str, name: str) -> str:
     b = (brand or "").strip(); n = (name or "").strip()
     if not b: return n
-    if _norm(n).startswith(_norm(b)):  # 제품명 앞에 이미 브랜드가 있으면 중복 제거
+    if _norm(n).startswith(_norm(b)):
         return n
     return f"{b} {n}"
 
