@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# app.py — OAuth(사용자 계정) 기반 GDrive 업로드 + 할인율 계산/표시
+# app.py — OAuth(사용자 계정) 기반 GDrive 업로드 + 할인율 계산/표시 (브랜드 중복 제거)
 
 import os
 import re
@@ -129,12 +129,9 @@ def parse_html_products(html: str):
             raw_name = name_node.get_text(" ", strip=True)
             cleaned = clean_title(raw_name)
 
-            # 가격: 올영 구조(예시)
-            # - 할인가: .tx_cur .tx_num / .tx_cur
-            # - 정가:   .tx_org .tx_num / .tx_org
+            # 가격
             sale_node = el.select_one(".tx_cur .tx_num") or el.select_one(".tx_cur")
             org_node  = el.select_one(".tx_org .tx_num") or el.select_one(".tx_org")
-
             sale_price = parse_won_to_int(sale_node.get_text(strip=True) if sale_node else "")
             original_price = parse_won_to_int(org_node.get_text(strip=True) if org_node else "")
 
@@ -148,7 +145,7 @@ def parse_html_products(html: str):
             if href and href.startswith("/"):
                 href = "https://www.oliveyoung.co.kr" + href
 
-            # 할인율 계산
+            # 할인율
             disc_pct = None
             if original_price and sale_price and original_price > sale_price:
                 disc_pct = int((original_price - sale_price) / original_price * 100)
@@ -186,7 +183,7 @@ def try_http_candidates():
             ct = r.headers.get("Content-Type","")
             text = r.text or ""
 
-            # JSON 모양이면 필드 매핑 시도
+            # JSON 매핑
             if "application/json" in ct or text.strip().startswith("{") or text.strip().startswith("["):
                 try:
                     data = r.json()
@@ -387,6 +384,22 @@ def send_slack_text(text):
     except Exception:
         return False
 
+def compose_link_text(brand: str | None, name: str | None) -> str:
+    """
+    슬랙 링크 텍스트 생성:
+    - name이 brand로 시작하면 brand를 중복으로 붙이지 않음
+    - '브랜드 브랜드 ...' 같은 중복 시작도 한 번 줄여서 표시
+    """
+    brand = (brand or "").strip()
+    name = (name or "").strip()
+    if not name:
+        return brand
+    if brand and name.lower().startswith(brand.lower()):
+        return name
+    if brand and name.lower().startswith((brand + " " + brand).lower()):
+        return name[len(brand):].lstrip()
+    return f"{brand} {name}".strip()
+
 
 # ---------------- 메인
 def main():
@@ -446,7 +459,7 @@ def main():
     else:
         logging.warning("OAuth Drive 미설정 또는 폴더ID 누락 -> 업로드 스킵")
 
-    # 전일 비교
+    # 전일 비교 (현 구조 유지)
     prev_items = None
     if drive_service and GDRIVE_FOLDER_ID:
         latest = find_latest_csv_in_drive(drive_service, GDRIVE_FOLDER_ID)
@@ -468,7 +481,7 @@ def main():
 
     up, down, firsts = analyze_trends(items_filled, prev_items or [])
 
-    # Slack 메시지 (가격: "9,950원 (50%)" 형태, 소수점 없음)
+    # Slack 메시지 (브랜드 중복 제거 + "9,950원 (50%)")
     top10 = items_filled[:10]
     now_kst = kst_now().strftime("%Y-%m-%d %H:%M KST")
     lines = [f"📊 올리브영 전체 랭킹(국내) ({now_kst})"]
@@ -480,10 +493,12 @@ def main():
         pct = it.get("discount_pct")
         price_str = fmt_price_with_discount(sale, pct)
         url = it.get("url")
+
+        link_text = compose_link_text(brand, name)
         if url:
-            lines.append(f"{rank}. <{url}|{brand} {name}> — {price_str}")
+            lines.append(f"{rank}. <{url}|{link_text}> — {price_str}")
         else:
-            lines.append(f"{rank}. {brand} {name} — {price_str}")
+            lines.append(f"{rank}. {link_text} — {price_str}")
 
     lines.append("")
     lines.append("🔥 급상승 TOP3")
