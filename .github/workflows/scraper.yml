@@ -2,15 +2,14 @@ name: OliveYoung Total Ranking Scraper
 
 on:
   schedule:
-    - cron: "0 0 * * *"    # 매일 00:00 UTC (한국 09:00) — 필요시 수정하세요
+    - cron: "0 3 * * *"    # 매일 03:00 UTC => 한국 12:00 (KST) — 사용자 요청대로 낮 12시 KST 실행
   workflow_dispatch:
 
 jobs:
   scrape:
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout repo
+      - name: Checkout
         uses: actions/checkout@v4
 
       - name: Setup Python
@@ -27,11 +26,13 @@ jobs:
       - name: Run scraper
         env:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          GDRIVE_SA_JSON_B64: ${{ secrets.GDRIVE_SA_JSON_B64 }}
+          GDRIVE_FOLDER_ID: ${{ secrets.GDRIVE_FOLDER_ID }}
         run: |
           python app.py
 
-      - name: Upload rankings artifact
+      - name: Upload artifact (local CSV backup)
         uses: actions/upload-artifact@v4
         with:
-          name: oliveyoung-rankings
+          name: rankings
           path: rankings/
