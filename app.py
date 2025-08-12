@@ -1,22 +1,16 @@
-# app.py
 import os
 import asyncio
 import pandas as pd
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from bs4 import BeautifulSoup
 from playwright.async_api import async_playwright
 import requests
-import pytz
 
 # 환경변수
 DROPBOX_TOKEN = os.environ.get("DROPBOX_ACCESS_TOKEN")
 SLACK_WEBHOOK_URL = os.environ.get("SLACK_WEBHOOK_URL")
 
 BASE_URL = "https://www.oliveyoung.co.kr/store/main/getBestList.do"
-
-# 한국 시간 기준 날짜
-def get_kst_now():
-    return datetime.now(pytz.timezone("Asia/Seoul"))
 
 # Dropbox 업로드
 def upload_to_dropbox(local_path, dropbox_path):
@@ -49,53 +43,100 @@ async def scrape_oliveyoung():
         browser = await p.chromium.launch(headless=True)
         page = await browser.new_page()
         await page.goto(BASE_URL, timeout=60000)
-        await page.wait_for_selector("ul.tab_cont_list", timeout=30000)  # 제품 로딩 대기
+        await page.wait_for_selector("ul.tab_cont_list", timeout=30000)  # 중요!
         html = await page.content()
         await browser.close()
 
     soup = BeautifulSoup(html, "html.parser")
-    names = soup.select("p.tx_name")
-    prices = soup.select("span.tx_num")
-    links = [a["href"] for a in soup.select("a.thumb_flag") if a.get("href")]
+    items = soup.select("ul.tab_cont_list li")
 
     data = []
     rank = 1
-    for name_tag, price_tag, link in zip(names, prices, links):
+    for item in items:
+        name_tag = item.select_one("p.tx_name")
+        price_tag = item.select_one("span.tx_num")
+        link_tag = item.select_one("a")
+
+        if not name_tag or not price_tag or not link_tag:
+            continue
+
         name = name_tag.get_text(strip=True)
         price = price_tag.get_text(strip=True)
-        product_url = f"https://www.oliveyoung.co.kr{link}"
+        href = link_tag["href"]
+        link = f"https://www.oliveyoung.co.kr{href}"
+
+        # 오특 여부 판단
+        is_otok = name.startswith("[오특]") or "오특" in name
+
         data.append({
             "순위": rank,
             "제품명": name,
             "가격": price,
-            "링크": product_url,
+            "링크": link,
+            "오특": "오특" if is_otok else ""
         })
         rank += 1
 
-    return pd.DataFrame(data)
+    df = pd.DataFrame(data)
+    return df
+
+# 급상승·급하락 분석
+def analyze_rank_changes(today_df, yesterday_df):
+    merged = pd.merge(today_df, yesterday_df, on="제품명", how="outer", suffixes=("_오늘", "_어제"))
+    merged["변화"] = merged["순위_어제"] - merged["순위_오늘"]
+
+    rising = merged.dropna(subset=["순위_오늘", "순위_어제"]).sort_values("변화", ascending=False).head(5)
+    new_entries = merged[merged["순위_어제"].isna()].sort_values("순위_오늘").head(5)
+    falling = merged.dropna(subset=["순위_오늘", "순위_어제"]).sort_values("변화", ascending=True).head(5)
+
+    return rising, new_entries, falling
 
 # 메인 실행
 if __name__ == "__main__":
-    now_kst = get_kst_now()
-    today_str = now_kst.strftime("%Y-%m-%d")
+    # 한국 시간 기준 날짜
+    KST = timezone(timedelta(hours=9))
+    today_str = datetime.now(KST).strftime("%Y-%m-%d")
     os.makedirs("rankings", exist_ok=True)
     csv_name = f"oliveyoung_{today_str}.csv"
     local_path = os.path.join("rankings", csv_name)
 
-    # 데이터 수집
     df_today = asyncio.run(scrape_oliveyoung())
-
-    # 파일 저장
     df_today.to_csv(local_path, index=False, encoding="utf-8-sig")
     print(f"✅ CSV 저장 완료: {local_path}")
+
+    # 전날 데이터 로드
+    yesterday_str = (datetime.now(KST) - timedelta(days=1)).strftime("%Y-%m-%d")
+    yesterday_path = os.path.join("rankings", f"oliveyoung_{yesterday_str}.csv")
+
+    rising = new_entries = falling = pd.DataFrame()
+    if os.path.exists(yesterday_path):
+        df_yesterday = pd.read_csv(yesterday_path)
+        rising, new_entries, falling = analyze_rank_changes(df_today, df_yesterday)
 
     # Dropbox 업로드
     upload_to_dropbox(local_path, f"/oliveyoung_rankings/{csv_name}")
 
-    # Slack 메시지
+    # Slack 메시지 구성
     msg = f":bar_chart: 올리브영 전체 랭킹 (국내) ({today_str})\n\n"
     msg += "*TOP 10*\n"
-    for _, row in df_today.head(10).iterrows():
-        msg += f"{row['순위']}. <{row['링크']}|{row['제품명']}> — {row['가격']}\n"
+    for i, row in df_today.head(10).iterrows():
+        label = f"[오특] " if row["오특"] == "오특" else ""
+        msg += f"{row.순위}. {label}<{row.링크}|{row.제품명}> — {row.가격}\n"
 
+    if not rising.empty:
+        msg += "\n:arrow_up: *급상승 TOP 5*\n"
+        for _, row in rising.iterrows():
+            msg += f"- {row.제품명}: {int(row.순위_어제)}위 → {int(row.순위_오늘)}위 (▲{int(row.변화)})\n"
+
+    if not new_entries.empty:
+        msg += "\n:new: *신규 진입*\n"
+        for _, row in new_entries.iterrows():
+            msg += f"- {row.제품명}: {int(row.순위_오늘)}위 (NEW)\n"
+
+    if not falling.empty:
+        msg += "\n:arrow_down: *급하락 TOP 5*\n"
+        for _, row in falling.iterrows():
+            msg += f"- {row.제품명}: {int(row.순위_어제)}위 → {int(row.순위_오늘)}위 (▼{abs(int(row.변화))})\n"
+
+    # Slack 전송
     send_slack_message(msg)
