@@ -13,6 +13,9 @@ SLACK_WEBHOOK_URL = os.environ.get("SLACK_WEBHOOK_URL")
 BASE_URL = "https://www.oliveyoung.co.kr/store/main/getBestList.do"
 
 # Dropbox 업로드
+
+import json
+
 def upload_to_dropbox(local_path, dropbox_path):
     with open(local_path, "rb") as f:
         data = f.read()
