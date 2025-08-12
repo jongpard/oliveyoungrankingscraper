@@ -24,7 +24,7 @@ os.makedirs(CSV_DIR, exist_ok=True)
 # 크롤링 함수 (수정 없음)
 # ===============================
 def scrape_oliveyoung():
-    url = "https://www.oliveyoung.co.kr/store/main/getBestList.do"
+    url = "https://www.oliveyoung.co.kr/store/main/getBestList.do?t_page=%ED%99%88&t_click=GNB&t_gnb_type=%EB%9E%AD%ED%82%B9&t_swiping_type=N"
     # User-Agent는 조금 더 일반적인 브라우저 형태로 지정하는 것이 안정적입니다.
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
