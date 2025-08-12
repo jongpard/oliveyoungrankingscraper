@@ -1,4 +1,3 @@
-# app.py
 import os
 import asyncio
 import pandas as pd
@@ -12,6 +11,7 @@ DROPBOX_TOKEN = os.environ.get("DROPBOX_ACCESS_TOKEN")
 SLACK_WEBHOOK_URL = os.environ.get("SLACK_WEBHOOK_URL")
 
 BASE_URL = "https://www.oliveyoung.co.kr/store/main/getBestList.do"
+PRODUCT_BASE_URL = "https://www.oliveyoung.co.kr/store/goods/getGoodsDetail.do?goodsNo="
 
 # Dropbox 업로드
 def upload_to_dropbox(local_path, dropbox_path):
@@ -48,15 +48,32 @@ async def scrape_oliveyoung():
         await browser.close()
 
     soup = BeautifulSoup(html, "html.parser")
-    names = soup.select("p.tx_name")
-    prices = soup.select("span.tx_num")
+    items = soup.select("ul.cate_prd_list li")
 
     data = []
     rank = 1
-    for name_tag, price_tag in zip(names, prices):
+    for item in items:
+        name_tag = item.select_one("p.tx_name")
+        price_tag = item.select_one("span.tx_num")
+        link_tag = item.select_one("a")
+
+        if not (name_tag and price_tag and link_tag):
+            continue
+
         name = name_tag.get_text(strip=True)
         price = price_tag.get_text(strip=True)
-        data.append({"순위": rank, "제품명": name, "가격": price})
+        href = link_tag.get("href", "")
+        goods_no = ""
+        if "goodsNo=" in href:
+            goods_no = href.split("goodsNo=")[-1].split("&")[0]
+        url = PRODUCT_BASE_URL + goods_no if goods_no else ""
+
+        data.append({
+            "순위": rank,
+            "제품명": name,
+            "가격": price,
+            "URL": url
+        })
         rank += 1
 
     return pd.DataFrame(data)
@@ -83,6 +100,7 @@ if __name__ == "__main__":
     df_today.to_csv(local_path, index=False, encoding="utf-8-sig")
     print(f"✅ CSV 저장 완료: {local_path}")
 
+    # 전날 파일 비교용
     yesterday_str = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
     yesterday_path = os.path.join("rankings", f"oliveyoung_{yesterday_str}.csv")
 
@@ -94,23 +112,26 @@ if __name__ == "__main__":
     # Dropbox 업로드
     upload_to_dropbox(local_path, f"/oliveyoung_rankings/{csv_name}")
 
-    # Slack 메시지
+    # Slack 메시지 구성
     msg = f":bar_chart: 올리브영 전체 랭킹 (국내) ({today_str})\n\n"
-    msg += "*TOP 10*\n" + "\n".join([f"{row.순위}. {row.제품명} — {row.가격}" for _, row in df_today.head(10).iterrows()])
+    msg += "*TOP 10*\n"
+    for _, row in df_today.head(10).iterrows():
+        name_link = f"<{row['URL']}|{row['제품명']}>" if row['URL'] else row['제품명']
+        msg += f"{row['순위']}. {name_link} — {row['가격']}\n"
 
     if not rising.empty:
-        msg += "\n\n:arrow_up: *급상승 TOP 5*\n" + "\n".join(
-            [f"- {row.제품명}: {int(row.순위_어제)}위 → {int(row.순위_오늘)}위 (▲{int(row.변화)})" for _, row in rising.iterrows()]
-        )
+        msg += "\n:arrow_up: *급상승 TOP 5*\n"
+        for _, row in rising.iterrows():
+            msg += f"- {row['제품명']}: {int(row['순위_어제'])}위 → {int(row['순위_오늘'])}위 (▲{int(row['변화'])})\n"
 
     if not new_entries.empty:
-        msg += "\n:new: *신규 진입*\n" + "\n".join(
-            [f"- {row.제품명}: {int(row.순위_오늘)}위 (NEW)" for _, row in new_entries.iterrows()]
-        )
+        msg += "\n:new: *신규 진입*\n"
+        for _, row in new_entries.iterrows():
+            msg += f"- {row['제품명']}: {int(row['순위_오늘'])}위 (NEW)\n"
 
     if not falling.empty:
-        msg += "\n\n:arrow_down: *급하락 TOP 5*\n" + "\n".join(
-            [f"- {row.제품명}: {int(row.순위_어제)}위 → {int(row.순위_오늘)}위 (▼{abs(int(row.변화))})" for _, row in falling.iterrows()]
-        )
+        msg += "\n:arrow_down: *급하락 TOP 5*\n"
+        for _, row in falling.iterrows():
+            msg += f"- {row['제품명']}: {int(row['순위_어제'])}위 → {int(row['순위_오늘'])}위 (▼{abs(int(row['변화']))})\n"
 
     send_slack_message(msg)
