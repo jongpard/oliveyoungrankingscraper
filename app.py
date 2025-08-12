@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# app.py
+# app.py (Dropbox 업로드 추가)
+
 import os
 import re
 import json
-import time
 import base64
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime
 from io import BytesIO, StringIO
-from zoneinfo import ZoneInfo  # KST 고정 표기용
+from zoneinfo import ZoneInfo
 
 import requests
 from requests.adapters import HTTPAdapter
@@ -23,21 +23,13 @@ try:
 except Exception:
     PLAYWRIGHT_AVAILABLE = False
 
-# Google Drive libs
-from google.oauth2 import service_account
-from googleapiclient.discovery import build
-from googleapiclient.http import MediaIoBaseUpload
-
 # ---------------- config (env)
 SLACK_WEBHOOK = os.environ.get("SLACK_WEBHOOK_URL", "").strip()
-GDRIVE_SA_JSON_B64 = os.environ.get("GDRIVE_SA_JSON_B64", "").strip()  # base64-encoded service account json
-GDRIVE_FOLDER_ID = os.environ.get("GDRIVE_FOLDER_ID", "").strip()      # target folder in Drive
+DROPBOX_ACCESS_TOKEN = os.environ.get("DROPBOX_ACCESS_TOKEN", "").strip()  # Dropbox 업로드용
 OUT_DIR = "rankings"
 MAX_ITEMS = 100
-
-# 고정 표기 시간(로컬 시간과 무관하게 Slack 헤더에 이 시간을 표기)
 KST = ZoneInfo("Asia/Seoul")
-FIXED_HHMM = "14:01"  # '오후 2시 1분' 고정 표기
+FIXED_HHMM = "14:01"
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s")
 
@@ -53,19 +45,14 @@ def make_session():
     })
     return s
 
-# remove leading bracketed tags and leading promo segments like "푸디젠 PICK | 리뷰 이벤트"
 def clean_title(raw: str) -> str:
     if not raw:
         return ""
     s = raw.strip()
-    # remove any [ ... ] at start (one or more)
     s = re.sub(r'^\s*(?:\[[^\]]*\]\s*)+', '', s)
-    # remove leading tokens up to real product name
     s = re.sub(r'^\s*([^|\n]{1,40}\|\s*)+', '', s)
-    # remove common promotional phrases at start (오특도 제거하지만 '오특 판단' 로직은 아예 사용 안함)
     s = re.sub(r'^\s*(리뷰 이벤트|PICK|오특|이벤트|특가|[^\s]*PICK)\s*[:\-–—]?\s*', '', s, flags=re.IGNORECASE)
-    s = re.sub(r'\s+', ' ', s).strip()
-    return s
+    return re.sub(r'\s+', ' ', s).strip()
 
 def extract_brand_from_name(name: str) -> str:
     if not name:
@@ -74,32 +61,25 @@ def extract_brand_from_name(name: str) -> str:
     if parts:
         candidate = parts[0]
         if re.match(r'^\d|\+|세트|기획', candidate):
-            if len(parts) > 1:
-                return parts[1]
-            return candidate
+            return parts[1] if len(parts) > 1 else candidate
         return candidate
     return name
 
 def parse_html_products(html: str):
     soup = BeautifulSoup(html, "html.parser")
-    candidate_selectors = [
-        "ul.cate_prd_list li",
-        "ul.prd_list li",
-        ".cate_prd_list li",
-        ".prd_info",
-        ".prd_box",
-        ".ranking_list li",
-        ".rank_item",
+    selectors = [
+        "ul.cate_prd_list li", "ul.prd_list li",
+        ".cate_prd_list li", ".prd_info", ".prd_box",
+        ".ranking_list li", ".rank_item",
     ]
     results = []
-    for sel in candidate_selectors:
+    for sel in selectors:
         els = soup.select(sel)
         if not els:
             continue
-        for idx, el in enumerate(els, start=1):
+        for el in els:
             if len(results) >= MAX_ITEMS:
                 break
-            # name heuristics
             name_node = None
             for ns in [".tx_name", ".prd_name .tx_name", ".prd_name", ".prd_tit", "a"]:
                 node = el.select_one(ns)
@@ -110,27 +90,17 @@ def parse_html_products(html: str):
                 continue
             raw_name = name_node.get_text(" ", strip=True)
             cleaned = clean_title(raw_name)
-            # price
-            price_node = el.select_one(".tx_cur .tx_num") or el.select_one(".tx_cur") or el.select_one(".prd_price .tx_num") or el.select_one(".prd_price")
+            price_node = el.select_one(".tx_cur .tx_num") or el.select_one(".tx_cur") \
+                         or el.select_one(".prd_price .tx_num") or el.select_one(".prd_price")
             price = price_node.get_text(strip=True) if price_node else ""
-            # brand
             brand_node = el.select_one(".tx_brand") or el.select_one(".brand")
             brand = brand_node.get_text(strip=True) if brand_node else extract_brand_from_name(cleaned)
-            # link
             link_node = el.select_one("a")
             href = link_node.get("href") if link_node else None
             if href and href.startswith("/"):
                 href = "https://www.oliveyoung.co.kr" + href
-            results.append({
-                "raw_name": raw_name,
-                "name": cleaned,
-                "brand": brand,
-                "price": price,
-                "url": href,
-                "rank": None  # fill later
-            })
+            results.append({"raw_name": raw_name, "name": cleaned, "brand": brand, "price": price, "url": href, "rank": None})
         if results:
-            logging.info("parse_html_products: found %d items using selector %s", len(results), sel)
             break
     return results
 
@@ -148,18 +118,14 @@ def try_http_candidates():
     ]
     for name, url, params in candidates:
         try:
-            logging.info("HTTP try %s %s %s", name, url, params)
             r = session.get(url, params=params, timeout=15)
-            logging.info(" -> status=%s content-type=%s len=%d", r.status_code, r.headers.get("Content-Type"), len(r.text or ""))
             if r.status_code != 200:
                 continue
-            ct = r.headers.get("Content-Type", "")
             text = r.text or ""
-            # try JSON
-            if "application/json" in ct or text.strip().startswith("{") or text.strip().startswith("["):
+            if "application/json" in r.headers.get("Content-Type", "") or text.strip().startswith("{"):
                 try:
                     data = r.json()
-                except Exception:
+                except:
                     data = None
                 if isinstance(data, dict):
                     for k in ["BestProductList", "list", "rows", "items", "bestList", "result"]:
@@ -173,321 +139,108 @@ def try_http_candidates():
                                 if isinstance(url_val, str) and url_val.startswith("/"):
                                     url_val = "https://www.oliveyoung.co.kr" + url_val
                                 cleaned = clean_title(name_val or "")
-                                out.append({
-                                    "raw_name": name_val,
-                                    "name": cleaned,
-                                    "brand": brand_val or extract_brand_from_name(cleaned),
-                                    "price": str(price_val or ""),
-                                    "url": url_val,
-                                    "rank": None
-                                })
-                            if out:
-                                logging.info("HTTP JSON parse via key %s found %d items", k, len(out))
-                                return out, text[:800]
-            # else parse HTML fragment
+                                out.append({"raw_name": name_val, "name": cleaned, "brand": brand_val or extract_brand_from_name(cleaned), "price": str(price_val or ""), "url": url_val, "rank": None})
+                            return out, text[:800]
             items = parse_html_products(text)
             if items:
                 return items, text[:800]
-        except Exception as e:
-            logging.exception("HTTP candidate error: %s %s", url, e)
+        except:
+            pass
     return None, None
 
 def try_playwright_render(url="https://www.oliveyoung.co.kr/store/main/getBestList.do"):
     if not PLAYWRIGHT_AVAILABLE:
-        logging.warning("Playwright not available.")
         return None, None
     try:
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=True, args=["--no-sandbox", "--disable-dev-shm-usage"])
-            context = browser.new_context(
-                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36",
-                locale="ko-KR"
-            )
+            context = browser.new_context(user_agent="Mozilla/5.0 ...", locale="ko-KR")
             page = context.new_page()
-            logging.info("Playwright navigating %s", url)
             page.goto(url, wait_until="networkidle", timeout=60000)
             page.wait_for_timeout(2500)
             html = page.content()
             items = parse_html_products(html)
             browser.close()
             return items, html[:800]
-    except Exception as e:
-        logging.exception("Playwright render error: %s", e)
+    except:
         return None, None
 
 def fill_ranks_and_fix(items):
-    # 순위는 1..MAX_ITEMS로 연속 부여
     out = []
-    rank = 1
-    for it in items:
-        it['rank'] = rank
+    for i, it in enumerate(items, start=1):
+        it["rank"] = i
         out.append(it)
-        rank += 1
-        if rank > MAX_ITEMS:
-            break
     return out
 
-# ---------------- Google Drive helpers
-def build_drive_service():
-    if not GDRIVE_SA_JSON_B64:
-        logging.warning("No GDRIVE_SA_JSON_B64 provided.")
-        return None
+# Dropbox 업로드
+def upload_to_dropbox(file_bytes, dropbox_path):
+    if not DROPBOX_ACCESS_TOKEN:
+        logging.warning("No DROPBOX_ACCESS_TOKEN set, skipping Dropbox upload")
+        return False
     try:
-        sa_json = base64.b64decode(GDRIVE_SA_JSON_B64)
-        sa_info = json.loads(sa_json.decode("utf-8"))
-        creds = service_account.Credentials.from_service_account_info(
-            sa_info, scopes=["https://www.googleapis.com/auth/drive"]
-        )
-        service = build("drive", "v3", credentials=creds, cache_discovery=False)
-        return service
-    except Exception as e:
-        logging.exception("Failed to build Drive service: %s", e)
-        return None
-
-def upload_csv_to_drive(service, csv_bytes, filename, folder_id=None):
-    if not service:
-        logging.warning("Drive service not available; skipping upload.")
-        return None
-    try:
-        media = MediaIoBaseUpload(BytesIO(csv_bytes), mimetype="text/csv", resumable=False)
-        file_metadata = {"name": filename}
-        if folder_id:
-            file_metadata["parents"] = [folder_id]
-        file = service.files().create(body=file_metadata, media_body=media, fields="id,webViewLink").execute()
-        logging.info("Uploaded to Drive id=%s link=%s", file.get("id"), file.get("webViewLink"))
-        return file
-    except Exception as e:
-        logging.exception("Drive upload failed: %s", e)
-        return None
-
-def find_latest_csv_in_drive(service, folder_id):
-    try:
-        q = (
-            f"mimeType='text/csv' and name contains '올리브영_랭킹' and '{folder_id}' in parents"
-            if folder_id else
-            "mimeType='text/csv' and name contains '올리브영_랭킹'"
-        )
-        res = service.files().list(q=q, orderBy="createdTime desc", pageSize=10, fields="files(id,name,createdTime)").execute()
-        files = res.get("files", [])
-        if files:
-            return files[0]
-        return None
-    except Exception as e:
-        logging.exception("find_latest_csv_in_drive error: %s", e)
-        return None
-
-def download_file_from_drive(service, file_id):
-    try:
-        request = service.files().get_media(fileId=file_id)
-        from googleapiclient.http import MediaIoBaseDownload
-        fh = BytesIO()
-        downloader = MediaIoBaseDownload(fh, request)
-        done = False
-        while not done:
-            status, done = downloader.next_chunk()
-        fh.seek(0)
-        data = fh.read().decode("utf-8")
-        return data
-    except Exception as e:
-        logging.exception("download_file_from_drive error: %s", e)
-        return None
-
-# ---------------- analysis
-def analyze_trends(today_items, prev_items):
-    """전일 대비 순위 변화 계산.
-    change = prev_rank - today_rank  (양수=상승, 음수=하락)
-    반환: (상승 top 리스트, 첫등장 리스트, 하락 top 리스트)
-    """
-    prev_map = {}
-    for p in (prev_items or []):
-        key = p.get("name") or p.get("raw_name")
-        prev_map[key] = p.get("rank")
-
-    trends = []
-    for it in today_items:
-        key = it.get("name") or it.get("raw_name")
-        prev_rank = prev_map.get(key)
-        if prev_rank:
-            change = prev_rank - it['rank']
-            trends.append({
-                "name": key,
-                "brand": it.get("brand"),
-                "rank": it['rank'],
-                "prev_rank": prev_rank,
-                "change": change,
-                "sample_product": it.get("name")
-            })
+        headers = {
+            "Authorization": f"Bearer {DROPBOX_ACCESS_TOKEN}",
+            "Content-Type": "application/octet-stream",
+            "Dropbox-API-Arg": json.dumps({"path": dropbox_path, "mode": "overwrite", "mute": False})
+        }
+        r = requests.post("https://content.dropboxapi.com/2/files/upload", headers=headers, data=file_bytes)
+        if r.status_code == 200:
+            logging.info(f"Uploaded to Dropbox: {dropbox_path}")
+            return True
         else:
-            trends.append({
-                "name": key,
-                "brand": it.get("brand"),
-                "rank": it['rank'],
-                "prev_rank": None,
-                "change": None,
-                "sample_product": it.get("name")
-            })
+            logging.error(f"Dropbox upload failed: {r.status_code} {r.text}")
+            return False
+    except Exception as e:
+        logging.exception(f"Dropbox upload error: {e}")
+        return False
 
-    movers = [t for t in trends if t.get("prev_rank")]
-    movers_up = sorted(movers, key=lambda x: x["change"], reverse=True)   # 상승 상위
-    movers_down = sorted(movers, key=lambda x: x["change"])               # 하락 상위(가장 음수)
-    firsts = [t for t in trends if t.get("prev_rank") is None]
-    return movers_up, firsts, movers_down
-
-# ---------------- Slack
+# Slack 전송
 def send_slack_text(text):
     if not SLACK_WEBHOOK:
-        logging.warning("No SLACK_WEBHOOK configured.")
         return False
     try:
         res = requests.post(SLACK_WEBHOOK, json={"text": text}, timeout=10)
-        if res.status_code // 100 == 2:
-            logging.info("Slack sent")
-            return True
-        else:
-            logging.warning("Slack returned %s: %s", res.status_code, res.text[:200])
-            return False
-    except Exception as e:
-        logging.exception("Slack send error: %s", e)
+        return res.status_code // 100 == 2
+    except:
         return False
 
-# ---------------- main flow
+# Main
 def main():
-    logging.info("Start scraping")
-
     items, sample = try_http_candidates()
     if not items:
-        logging.info("HTTP failed, trying Playwright fallback")
         items, sample = try_playwright_render()
     if not items:
-        logging.error("Scraping failed entirely. Sample head: %s", (sample or "")[:500])
-        send_slack_text(f"❌ OliveYoung scraping failed. Sample head:\n{(sample or '')[:800]}")
+        send_slack_text("❌ OliveYoung scraping failed.")
         return 1
 
-    # ensure up to MAX_ITEMS
-    if len(items) > MAX_ITEMS:
-        items = items[:MAX_ITEMS]
-
-    # 순위 연속 부여 (오특 로직 완전 제거)
-    items_filled = fill_ranks_and_fix(items)
-
-    # ===== 날짜/시간 표기(KST) =====
+    items = fill_ranks_and_fix(items)
     now_kst = datetime.now(KST)
-    date_str = now_kst.date().isoformat()     # YYYY-MM-DD
-    time_str = FIXED_HHMM                      # '14:01' 고정
-    # 파일명은 기존과의 호환을 위해 날짜만 사용
+    date_str = now_kst.date().isoformat()
+    time_str = FIXED_HHMM
     fname = f"올리브영_랭킹_{date_str}.csv"
 
-    # ----- CSV 저장 -----
-    os.makedirs(OUT_DIR, exist_ok=True)
-    csv_lines = []
-    header = ["rank", "brand", "name", "price", "url", "raw_name"]
-    csv_lines.append(",".join(header))
-    for it in items_filled:
+    csv_lines = ["rank,brand,name,price,url,raw_name"]
+    for it in items:
         def q(s):
             if s is None:
                 return ""
             s = str(s).replace('"', '""')
-            if ',' in s or '\n' in s or '"' in s:
-                return f'"{s}"'
-            return s
-        row = [q(it.get("rank")), q(it.get("brand")), q(it.get("name")), q(it.get("price")), q(it.get("url")), q(it.get("raw_name"))]
-        csv_lines.append(",".join(row))
-    csv_data = ("\n".join(csv_lines)).encode("utf-8")
+            return f'"{s}"' if any(c in s for c in [',', '"', '\n']) else s
+        csv_lines.append(",".join([q(it.get("rank")), q(it.get("brand")), q(it.get("name")), q(it.get("price")), q(it.get("url")), q(it.get("raw_name"))]))
+    csv_data = "\n".join(csv_lines).encode("utf-8")
 
-    # Google Drive 업로드(또는 로컬 저장)
-    drive_service = build_drive_service()
-    if drive_service and GDRIVE_FOLDER_ID:
-        upload_csv_to_drive(drive_service, csv_data, fname, folder_id=GDRIVE_FOLDER_ID)
-    else:
-        path = os.path.join(OUT_DIR, fname)
-        with open(path, "wb") as f:
-            f.write(csv_data)
-        logging.info("Saved CSV locally: %s", path)
+    # Dropbox 업로드
+    dropbox_path = f"/rankings/{fname}"
+    upload_to_dropbox(csv_data, dropbox_path)
 
-    # ----- Slack 메시지 빌드 -----
-    top10 = items_filled[:10]
-    lines = []
-    # 헤더에 고정 시간 표기
-    lines.append(f"📊 OliveYoung Total Ranking ({date_str} {time_str} KST)")
-    for it in top10:
-        rank = it.get("rank")
-        brand = it.get("brand") or ""
-        name = it.get("name") or ""
-        price = it.get("price") or ""
-        url = it.get("url")
-        if url:
-            lines.append(f"{rank}. <{url}|{brand} {name}> — {price}")
+    # Slack 메시지
+    lines = [f"📊 OliveYoung Total Ranking ({date_str} {time_str} KST)"]
+    for it in items[:10]:
+        if it.get("url"):
+            lines.append(f"{it['rank']}. <{it['url']}|{it['brand']} {it['name']}> — {it['price']}")
         else:
-            lines.append(f"{rank}. {brand} {name} — {price}")
-
-    # 전일 파일(가장 최신의 다른 날짜) 불러와서 추세 분석
-    prev_items = None
-    if drive_service and GDRIVE_FOLDER_ID:
-        latest = find_latest_csv_in_drive(drive_service, GDRIVE_FOLDER_ID)
-        if latest and latest.get("name") != fname:
-            logging.info("Found previous file %s - attempting download", latest.get("name"))
-            prev_csv_text = download_file_from_drive(drive_service, latest.get("id"))
-            if prev_csv_text:
-                try:
-                    import csv
-                    sio = StringIO(prev_csv_text)
-                    rdr = csv.DictReader(sio)
-                    prev_items = []
-                    for r in rdr:
-                        try:
-                            prev_items.append({
-                                "rank": int(r.get("rank") or 0),
-                                "name": r.get("name"),
-                                "raw_name": r.get("raw_name")
-                            })
-                        except:
-                            continue
-                except Exception as e:
-                    logging.exception("CSV parse failed: %s", e)
-
-    # 추세 분석: 상승, 첫등장, 하락(급하락)
-    movers_up, firsts, movers_down = analyze_trends(items_filled, prev_items or [])
-
-    # 상승 TOP
-    lines.append("")
-    lines.append("🔥 급상승 브랜드")
-    if not movers_up:
-        lines.append("- (데이터 부족 또는 이전 데이터 없음)")
-    else:
-        for m in movers_up[:3]:
-            change = m["prev_rank"] - m["rank"]
-            lines.append(f"- {m.get('brand')}: {m.get('prev_rank')}위 → {m.get('rank')}위 (▲{change})")
-            sample = m.get("sample_product") or m.get("name")
-            if sample:
-                lines.append(f"  ▶ {sample}")
-
-    # 첫 등장
-    lines.append("")
-    lines.append("⭐ 첫 등장/주목 신상품")
-    first_true = [f for f in firsts if f.get("prev_rank") is None]
-    if not first_true:
-        lines.append("- (전일 대비 신규 진입 없음)")
-    else:
-        for f in first_true[:3]:
-            lines.append(f"- {f.get('brand')}: 첫 등장 {f.get('rank')}위")
-            lines.append(f"  ▶ {f.get('sample_product')}")
-
-    # 하락 TOP (급하락)
-    lines.append("")
-    lines.append("📉 급하락 브랜드")
-    if not movers_down:
-        lines.append("- (데이터 부족 또는 이전 데이터 없음)")
-    else:
-        for m in movers_down[:3]:
-            drop = m["rank"] - m["prev_rank"]  # 양수면 하락 폭
-            # change 값은 prev - today 라 음수, 보기 좋게 ▼표기
-            lines.append(f"- {m.get('brand')}: {m.get('prev_rank')}위 → {m.get('rank')}위 (▼{drop})")
-            sample = m.get("sample_product") or m.get("name")
-            if sample:
-                lines.append(f"  ▶ {sample}")
-
+            lines.append(f"{it['rank']}. {it['brand']} {it['name']} — {it['price']}")
     send_slack_text("\n".join(lines))
-    logging.info("Done.")
     return 0
 
 if __name__ == "__main__":
