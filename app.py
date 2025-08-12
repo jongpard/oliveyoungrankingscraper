@@ -18,7 +18,13 @@ def upload_to_dropbox(local_path, dropbox_path):
         data = f.read()
     headers = {
         "Authorization": f"Bearer {DROPBOX_TOKEN}",
-        "Dropbox-API-Arg": '{"path": "" + dropbox_path + "", "mode": "overwrite"}',
+        "Dropbox-API-Arg": json.dumps({
+            "path": dropbox_path,
+            "mode": "overwrite",
+            "autorename": False,
+            "mute": False,
+            "strict_conflict": False
+        }),
         "Content-Type": "application/octet-stream"
     }
     r = requests.post("https://content.dropboxapi.com/2/files/upload", headers=headers, data=data)
