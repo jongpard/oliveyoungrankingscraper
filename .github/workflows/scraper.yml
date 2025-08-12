@@ -16,21 +16,47 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
-          python-version: "3.10"
+          python-version: "3.11"  # 3.10에서 3.11로 업그레이드
           
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libgstreamer1.0-0 libgtk-4-1 libgraphene-1.0-0 libxslt1.1 libwoff1 libvpx9 libevent-2.1-7t64 libopus0 libgstreamer-plugins-base1.0-0 libgstreamer-plugins-bad1.0-0 libflite1 libharfbuzz-icu0 libwebpmux3 libenchant-2-2 libsecret-1-0 libhyphen0 libmanette-0-2-0
+          sudo apt-get install -y \
+            libgstreamer1.0-0 \
+            libgtk-4-1 \
+            libgraphene-1.0-0 \
+            libxslt1.1 \
+            libwoff1 \
+            libvpx9 \
+            libevent-2.1-7t64 \
+            libopus0 \
+            libgstreamer-plugins-base1.0-0 \
+            libgstreamer-plugins-bad1.0-0 \
+            libflite1 \
+            libharfbuzz-icu0 \
+            libwebpmux3 \
+            libenchant-2-2 \
+            libsecret-1-0 \
+            libhyphen0 \
+            libmanette-0-2-0 \
+            wget \
+            unzip
           
       - name: Install Python dependencies
         run: |
-          python -m pip install --upgrade pip
+          python -m pip install --upgrade pip setuptools wheel
+          pip install --upgrade pip
           pip install -r requirements.txt
           
       - name: Install Playwright browsers
         run: |
-          playwright install
+          playwright install --with-deps chromium
+          
+      - name: Test Python environment
+        run: |
+          python --version
+          pip list | grep -E "(playwright|dropbox|gspread|pandas)"
+          playwright --version
           
       - name: Run Integrated Scraper
         env:
@@ -38,7 +64,17 @@ jobs:
           DROPBOX_ACCESS_TOKEN: ${{ secrets.DROPBOX_ACCESS_TOKEN }}
           GOOGLE_SHEETS_CREDENTIALS: ${{ secrets.GOOGLE_SHEETS_CREDENTIALS }}
         run: |
+          echo "🔧 환경변수 상태:"
+          echo "SLACK_WEBHOOK_URL: ${SLACK_WEBHOOK_URL:+'설정됨'}"
+          echo "DROPBOX_ACCESS_TOKEN: ${DROPBOX_ACCESS_TOKEN:+'설정됨'}"
+          echo "GOOGLE_SHEETS_CREDENTIALS: ${GOOGLE_SHEETS_CREDENTIALS:+'설정됨'}"
+          echo ""
           python integrated_scraper.py
+          
+      - name: Check generated files
+        run: |
+          echo "📁 생성된 파일들:"
+          ls -la *.json *.csv *.xlsx 2>/dev/null || echo "파일이 생성되지 않았습니다"
           
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
@@ -49,11 +85,20 @@ jobs:
             oliveyoung_rankings_*.csv
             oliveyoung_rankings_*.xlsx
           retention-days: 30
+          if-no-files-found: warn
           
       - name: Commit and push results
+        if: success()
         run: |
           git config --local user.email "action@github.com"
           git config --local user.name "GitHub Action"
-          git add ranking_*.json oliveyoung_rankings_*.csv oliveyoung_rankings_*.xlsx
-          git commit -m "Update OliveYoung rankings - $(date +'%Y-%m-%d')" || echo "No changes to commit"
-          git push || echo "No changes to push"
+          
+          # 파일 존재 확인
+          if ls ranking_*.json oliveyoung_rankings_*.csv oliveyoung_rankings_*.xlsx 1> /dev/null 2>&1; then
+            git add ranking_*.json oliveyoung_rankings_*.csv oliveyoung_rankings_*.xlsx
+            git commit -m "Update OliveYoung rankings - $(date +'%Y-%m-%d')" || echo "No changes to commit"
+            git push || echo "No changes to push"
+            echo "✅ 결과 파일 커밋 및 푸시 완료"
+          else
+            echo "⚠️ 결과 파일이 없어 커밋을 건너뜁니다"
+          fi
