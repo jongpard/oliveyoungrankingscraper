@@ -375,7 +375,7 @@ def main():
     # prepare Slack message
     top10 = items_filled[:10]
     lines = []
-    lines.append(f"📊 OliveYoung Total Ranking ({today.isoformat()})")
+    lines.append(f"📊 올리브영 전체 랭킹(국내) ({today.isoformat()})")
     for it in top10:
         rank = it.get("rank")
         brand = it.get("brand") or ""
