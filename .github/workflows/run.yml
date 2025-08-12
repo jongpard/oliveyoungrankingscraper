@@ -2,19 +2,18 @@ name: OY GDrive Runner
 
 on:
   schedule:
-    - cron: "1 5 * * *"   # 매일 KST 14:01 (UTC 05:01)
-  workflow_dispatch: {}
+    - cron: "1 5 * * *" # 매일 KST 14:01 (UTC 05:01)
+  workflow_dispatch:
 
 jobs:
   run:
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
-    # ✅ 모든 스텝이 상속받는 환경변수 (Secrets에서 가져옴)
     env:
       SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
       GDRIVE_SA_JSON_B64: ${{ secrets.GDRIVE_SA_JSON_B64 }}
-      GDRIVE_FOLDER_ID:   ${{ secrets.GDRIVE_FOLDER_ID }}
+      GDRIVE_FOLDER_ID: ${{ secrets.GDRIVE_FOLDER_ID }}
 
     steps:
       - name: Checkout
@@ -32,26 +31,14 @@ jobs:
                       google-api-python-client google-auth google-auth-httplib2 google-auth-oauthlib
           python -m playwright install chromium
 
-      # 🔎 시크릿 주입 확인 (app 실행 전에!)
       - name: Debug env presence
         run: |
           python - << 'PY'
           import os
-          for k in ["GDRIVE_SA_JSON_B64","GDRIVE_FOLDER_ID","SLACK_WEBHOOK_URL"]:
+          for k in ["GDRIVE_SA_JSON_B64", "GDRIVE_FOLDER_ID", "SLACK_WEBHOOK_URL"]:
               v = os.getenv(k)
               print(k, "=", "SET" if v else "MISSING", "| length =", (len(v) if v else 0))
           PY
 
       - name: Run scraper
         run: python app.py
-
-      # 실패 시 디버깅 파일 업로드(선택)
-      - name: Upload artifacts on failure
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: oy-debug
-          path: |
-            rankings/**
-            artifacts/**
-          if-no-files-found: ignore
