@@ -471,7 +471,7 @@ def main():
     # Slack 메시지 (가격: "9,950원 (50%)" 형태, 소수점 없음)
     top10 = items_filled[:10]
     now_kst = kst_now().strftime("%Y-%m-%d %H:%M KST")
-    lines = [f"📊 OliveYoung Total Ranking ({now_kst})"]
+    lines = [f"📊 올리브영 전체 랭킹(국내) ({now_kst})"]
     for it in top10:
         rank = it.get("rank")
         brand = it.get("brand") or ""
