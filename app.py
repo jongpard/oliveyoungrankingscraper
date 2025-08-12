@@ -339,4 +339,156 @@ def send_slack_text(text):
         logging.warning("No SLACK_WEBHOOK configured.")
         return False
     try:
-        res = requests.post(SLACK_WEBHOOK,_
+        res = requests.post(SLACK_WEBHOOK, json={"text": text}, timeout=10)
+        if res.status_code // 100 == 2:
+            logging.info("Slack sent")
+            return True
+        else:
+            logging.warning("Slack returned %s: %s", res.status_code, res.text[:200])
+            return False
+    except Exception as e:
+        logging.exception("Slack send error: %s", e)
+        return False
+
+# ---------------- main flow
+def main():
+    logging.info("Start scraping")
+
+    items, sample = try_http_candidates()
+    if not items:
+        logging.info("HTTP failed, trying Playwright fallback")
+        items, sample = try_playwright_render()
+    if not items:
+        logging.error("Scraping failed entirely. Sample head: %s", (sample or "")[:500])
+        send_slack_text(f"❌ OliveYoung scraping failed. Sample head:\n{(sample or '')[:800]}")
+        return 1
+
+    # ensure up to MAX_ITEMS
+    if len(items) > MAX_ITEMS:
+        items = items[:MAX_ITEMS]
+
+    # 순위 연속 부여 (오특 로직 완전 제거)
+    items_filled = fill_ranks_and_fix(items)
+
+    # ===== 날짜/시간 표기(KST) =====
+    now_kst = datetime.now(KST)
+    date_str = now_kst.date().isoformat()     # YYYY-MM-DD
+    time_str = FIXED_HHMM                      # '14:01' 고정
+    # 파일명은 기존과의 호환을 위해 날짜만 사용
+    fname = f"올리브영_랭킹_{date_str}.csv"
+
+    # ----- CSV 저장 -----
+    os.makedirs(OUT_DIR, exist_ok=True)
+    csv_lines = []
+    header = ["rank", "brand", "name", "price", "url", "raw_name"]
+    csv_lines.append(",".join(header))
+    for it in items_filled:
+        def q(s):
+            if s is None:
+                return ""
+            s = str(s).replace('"', '""')
+            if ',' in s or '\n' in s or '"' in s:
+                return f'"{s}"'
+            return s
+        row = [q(it.get("rank")), q(it.get("brand")), q(it.get("name")), q(it.get("price")), q(it.get("url")), q(it.get("raw_name"))]
+        csv_lines.append(",".join(row))
+    csv_data = ("\n".join(csv_lines)).encode("utf-8")
+
+    # Google Drive 업로드(또는 로컬 저장)
+    drive_service = build_drive_service()
+    if drive_service and GDRIVE_FOLDER_ID:
+        upload_csv_to_drive(drive_service, csv_data, fname, folder_id=GDRIVE_FOLDER_ID)
+    else:
+        path = os.path.join(OUT_DIR, fname)
+        with open(path, "wb") as f:
+            f.write(csv_data)
+        logging.info("Saved CSV locally: %s", path)
+
+    # ----- Slack 메시지 빌드 -----
+    top10 = items_filled[:10]
+    lines = []
+    # 헤더에 고정 시간 표기
+    lines.append(f"📊 OliveYoung Total Ranking ({date_str} {time_str} KST)")
+    for it in top10:
+        rank = it.get("rank")
+        brand = it.get("brand") or ""
+        name = it.get("name") or ""
+        price = it.get("price") or ""
+        url = it.get("url")
+        if url:
+            lines.append(f"{rank}. <{url}|{brand} {name}> — {price}")
+        else:
+            lines.append(f"{rank}. {brand} {name} — {price}")
+
+    # 전일 파일(가장 최신의 다른 날짜) 불러와서 추세 분석
+    prev_items = None
+    if drive_service and GDRIVE_FOLDER_ID:
+        latest = find_latest_csv_in_drive(drive_service, GDRIVE_FOLDER_ID)
+        if latest and latest.get("name") != fname:
+            logging.info("Found previous file %s - attempting download", latest.get("name"))
+            prev_csv_text = download_file_from_drive(drive_service, latest.get("id"))
+            if prev_csv_text:
+                try:
+                    import csv
+                    sio = StringIO(prev_csv_text)
+                    rdr = csv.DictReader(sio)
+                    prev_items = []
+                    for r in rdr:
+                        try:
+                            prev_items.append({
+                                "rank": int(r.get("rank") or 0),
+                                "name": r.get("name"),
+                                "raw_name": r.get("raw_name")
+                            })
+                        except:
+                            continue
+                except Exception as e:
+                    logging.exception("CSV parse failed: %s", e)
+
+    # 추세 분석: 상승, 첫등장, 하락(급하락)
+    movers_up, firsts, movers_down = analyze_trends(items_filled, prev_items or [])
+
+    # 상승 TOP
+    lines.append("")
+    lines.append("🔥 급상승 브랜드")
+    if not movers_up:
+        lines.append("- (데이터 부족 또는 이전 데이터 없음)")
+    else:
+        for m in movers_up[:3]:
+            change = m["prev_rank"] - m["rank"]
+            lines.append(f"- {m.get('brand')}: {m.get('prev_rank')}위 → {m.get('rank')}위 (▲{change})")
+            sample = m.get("sample_product") or m.get("name")
+            if sample:
+                lines.append(f"  ▶ {sample}")
+
+    # 첫 등장
+    lines.append("")
+    lines.append("⭐ 첫 등장/주목 신상품")
+    first_true = [f for f in firsts if f.get("prev_rank") is None]
+    if not first_true:
+        lines.append("- (전일 대비 신규 진입 없음)")
+    else:
+        for f in first_true[:3]:
+            lines.append(f"- {f.get('brand')}: 첫 등장 {f.get('rank')}위")
+            lines.append(f"  ▶ {f.get('sample_product')}")
+
+    # 하락 TOP (급하락)
+    lines.append("")
+    lines.append("📉 급하락 브랜드")
+    if not movers_down:
+        lines.append("- (데이터 부족 또는 이전 데이터 없음)")
+    else:
+        for m in movers_down[:3]:
+            drop = m["rank"] - m["prev_rank"]  # 양수면 하락 폭
+            # change 값은 prev - today 라 음수, 보기 좋게 ▼표기
+            lines.append(f"- {m.get('brand')}: {m.get('prev_rank')}위 → {m.get('rank')}위 (▼{drop})")
+            sample = m.get("sample_product") or m.get("name")
+            if sample:
+                lines.append(f"  ▶ {sample}")
+
+    send_slack_text("\n".join(lines))
+    logging.info("Done.")
+    return 0
+
+if __name__ == "__main__":
+    exit(main())
