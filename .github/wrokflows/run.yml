@@ -1,63 +1,46 @@
+# .github/workflows/run.yml
 name: OliveYoung Ranking
 
 on:
-  # 매일 KST 14:01 (UTC 05:01) 실행
   schedule:
-    - cron: "1 5 * * *"
-  # 수동 실행 버튼
+    - cron: "1 5 * * *"   # KST 14:01
   workflow_dispatch: {}
-
-concurrency:
-  group: oliveyoung-ranking
-  cancel-in-progress: false
-
-permissions:
-  contents: read
 
 jobs:
   run:
     runs-on: ubuntu-latest
 
+    # ✅ JOB 레벨에 시크릿 주입(모든 스텝 상속)
+    env:
+      SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+      DROPBOX_APP_KEY: ${{ secrets.DROPBOX_APP_KEY }}
+      DROPBOX_APP_SECRET: ${{ secrets.DROPBOX_APP_SECRET }}
+      DROPBOX_REFRESH_TOKEN: ${{ secrets.DROPBOX_REFRESH_TOKEN }}
+
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.10"
-
-      - name: Cache pip
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
-          restore-keys: |
-            ${{ runner.os }}-pip-
-
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.10" }
       - name: Install deps
         run: |
           python -m pip install --upgrade pip
-          # requirements.txt가 있으면 설치, 없으면 최소 패키지 설치
-          if [ -f requirements.txt ]; then
-            pip install -r requirements.txt
-          else
-            pip install requests beautifulsoup4 urllib3 playwright
-          fi
-          # Playwright(HTTP 실패시 대비) 브라우저 설치
+          pip install requests beautifulsoup4 urllib3 playwright
           python -m playwright install chromium
 
-      - name: Run app.py
-        env:
-          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
-          DROPBOX_APP_KEY: ${{ secrets.DROPBOX_APP_KEY }}
-          DROPBOX_APP_SECRET: ${{ secrets.DROPBOX_APP_SECRET }}
-          DROPBOX_REFRESH_TOKEN: ${{ secrets.DROPBOX_REFRESH_TOKEN }}
+      # 🔎 디버그: 값 존재 여부만(실제 값은 안 찍음)
+      - name: Debug env presence
         run: |
-          python app.py
+          python - << 'PY'
+          import os
+          def ok(k): print(f"{k} set =", "YES" if os.getenv(k) else "NO")
+          for k in ["SLACK_WEBHOOK_URL","DROPBOX_APP_KEY","DROPBOX_APP_SECRET","DROPBOX_REFRESH_TOKEN"]:
+              ok(k)
+          PY
 
-      # 실패 시 디버그 자료 확보
-      - name: Upload local CSV/artifacts on failure
+      - name: Run app
+        run: python app.py
+
+      - name: Upload artifacts on failure
         if: failure()
         uses: actions/upload-artifact@v4
         with:
@@ -65,13 +48,4 @@ jobs:
           path: |
             rankings/**
             artifacts/**
-          if-no-files-found: ignore
-
-      # 성공 시 CSV도 보관(선택)
-      - name: Upload latest CSV (optional)
-        if: success()
-        uses: actions/upload-artifact@v4
-        with:
-          name: oy-latest-csv
-          path: rankings/**
           if-no-files-found: ignore
