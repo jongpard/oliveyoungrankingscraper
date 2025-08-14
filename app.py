@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# app.py — OAuth(사용자 계정) 기반 GDrive 업로드 + 할인율 계산/표시 (전일 비교 & 이름 정규화 매칭, 브랜드 중복 제거)
+# app.py — GDrive(OAuth, 사용자 계정) 업로드 + 할인율/전일비 분석(한국시간) + Slack 포맷 개선
 
 import os
 import re
@@ -36,9 +36,11 @@ GOOGLE_REFRESH_TOKEN = os.environ.get("GOOGLE_REFRESH_TOKEN", "").strip()
 GDRIVE_FOLDER_ID = os.environ.get("GDRIVE_FOLDER_ID", "").strip()
 
 OUT_DIR = "rankings"
-MAX_ITEMS = 100
+MAX_ITEMS = 100        # 크롤링 최대 아이템
+TOP_WINDOW = 30        # 인/아웃 판정, 급하락/랭크아웃 기준 윈도우(상위 30)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s")
+
 
 # ---------------- 유틸
 def kst_now():
@@ -75,14 +77,6 @@ def fmt_price_with_discount(sale: int | None, disc_pct: int | None) -> str:
         return f"{sale:,}원"
     return f"{sale:,}원 ({disc_pct}%)"
 
-# 비교용 이름 정규화(공백/특수문자 제거, 소문자화)
-_norm_pat = re.compile(r"[^\w가-힣]+", re.UNICODE)
-def norm_key(s: str | None) -> str:
-    if not s:
-        return ""
-    s = s.lower().strip()
-    s = _norm_pat.sub("", s)  # 영문/숫자/한글 외 제거
-    return s
 
 # ---------------- 파싱/정제
 def clean_title(raw: str) -> str:
@@ -160,7 +154,6 @@ def parse_html_products(html: str):
             results.append({
                 "raw_name": raw_name,
                 "name": cleaned,
-                "name_key": norm_key(cleaned),  # 비교용 키
                 "brand": brand,
                 "url": href,
                 "original_price": original_price,
@@ -191,7 +184,7 @@ def try_http_candidates():
             ct = r.headers.get("Content-Type","")
             text = r.text or ""
 
-            # JSON 매핑
+            # JSON 스키마 추정
             if "application/json" in ct or text.strip().startswith("{") or text.strip().startswith("["):
                 try:
                     data = r.json()
@@ -223,7 +216,6 @@ def try_http_candidates():
                                 out.append({
                                     "raw_name": name_val,
                                     "name": cleaned,
-                                    "name_key": norm_key(cleaned),
                                     "brand": brand,
                                     "url": url_val,
                                     "original_price": original_price,
@@ -281,6 +273,7 @@ def fill_ranks_and_fix(items):
             break
     return out
 
+
 # ---------------- Google Drive (OAuth)
 def build_drive_service_oauth():
     if not (GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET and GOOGLE_REFRESH_TOKEN):
@@ -310,32 +303,26 @@ def upload_csv_to_drive(service, csv_bytes, filename, folder_id=None):
         body = {"name": filename}
         if folder_id:
             body["parents"] = [folder_id]
-        f = service.files().create(body=body, media_body=media, fields="id,webViewLink").execute()
-        logging.info("Uploaded to Drive: id=%s link=%s", f.get("id"), f.get("webViewLink"))
+        f = service.files().create(body=body, media_body=media, fields="id,webViewLink,name").execute()
+        logging.info("Uploaded to Drive: id=%s name=%s link=%s", f.get("id"), f.get("name"), f.get("webViewLink"))
         return f
     except Exception as e:
         logging.exception("Drive upload 실패: %s", e)
         return None
 
-def find_latest_csv_in_drive(service, folder_id):
+def find_csv_by_exact_name(service, folder_id: str, filename: str):
+    """파일명(정확일치)으로 검색 (한국시간 기반 전일 파일 찾기에 사용)."""
     try:
-        q = f"mimeType='text/csv' and name contains '올리브영_랭킹' and '{folder_id}' in parents" if folder_id \
-            else "mimeType='text/csv' and name contains '올리브영_랭킹'"
-        res = service.files().list(q=q, orderBy="createdTime desc", pageSize=20,
-                                   fields="files(id,name,createdTime)").execute()
-        files = res.get("files", []) or []
-        return files
+        if folder_id:
+            q = f"name='{filename}' and '{folder_id}' in parents and mimeType='text/csv'"
+        else:
+            q = f"name='{filename}' and mimeType='text/csv'"
+        res = service.files().list(q=q, pageSize=1, fields="files(id,name,createdTime)").execute()
+        files = res.get("files", [])
+        return files[0] if files else None
     except Exception as e:
-        logging.exception("find_latest_csv_in_drive error: %s", e)
-        return []
-
-def find_previous_csv_excluding_current(service, folder_id, current_filename):
-    """오늘 파일명과 다른 가장 최근 CSV 1개"""
-    files = find_latest_csv_in_drive(service, folder_id)
-    for f in files:
-        if f.get("name") != current_filename:
-            return f
-    return None
+        logging.exception("find_csv_by_exact_name error: %s", e)
+        return None
 
 def download_file_from_drive(service, file_id):
     try:
@@ -351,23 +338,33 @@ def download_file_from_drive(service, file_id):
         logging.exception("download_file_from_drive error: %s", e)
         return None
 
-# ---------------- 분석(급상승/급하락/신규)
-def analyze_trends(today_items, prev_items):
+
+# ---------------- 분석(급상승/급하락/차트인/랭크아웃)
+def analyze_trends(today_items, prev_items, top_window=TOP_WINDOW):
+    """이름 기준 매칭. 전일 순위(prev_rank)와 금일 순위(rank)를 비교.
+       - 급상승: prev→today 순위 개선(양수 change) 상위 정렬
+       - 급하락: prev→today 순위 하락(음수 change) 하위 정렬
+       - 차트인(뉴랭커): prev에 없고 today<=top_window
+       - 랭크아웃: prev<=top_window 였는데 today에 없음
+       - 인/아웃 카운트: 차트인 개수 + 랭크아웃 개수
+    """
     prev_map = {}
+    prev_top_names = set()
     for p in (prev_items or []):
-        key = norm_key(p.get("name") or p.get("raw_name"))
-        if not key:
-            continue
-        prev_map[key] = p.get("rank")
+        key = p.get("name") or p.get("raw_name")
+        r = p.get("rank")
+        prev_map[key] = r
+        if r and r <= top_window:
+            prev_top_names.add(key)
 
     trends = []
     for it in today_items:
-        key = it.get("name_key") or norm_key(it.get("name") or it.get("raw_name"))
+        key = it.get("name") or it.get("raw_name")
         prev_rank = prev_map.get(key)
         if prev_rank:
-            change = prev_rank - it['rank']  # +: 상승, -: 하락
+            change = prev_rank - it['rank']  # +면 상승, -면 하락
             trends.append({
-                "name": it.get("name"),
+                "name": key,
                 "brand": it.get("brand"),
                 "rank": it['rank'],
                 "prev_rank": prev_rank,
@@ -375,8 +372,9 @@ def analyze_trends(today_items, prev_items):
                 "sample_product": it.get("name")
             })
         else:
+            # 전일 없음(뉴랭커/신규)
             trends.append({
-                "name": it.get("name"),
+                "name": key,
                 "brand": it.get("brand"),
                 "rank": it['rank'],
                 "prev_rank": None,
@@ -385,10 +383,26 @@ def analyze_trends(today_items, prev_items):
             })
 
     movers = [t for t in trends if t.get("prev_rank")]
-    up = sorted(movers, key=lambda x: x["change"], reverse=True)
-    down = sorted(movers, key=lambda x: x["change"])
-    firsts = [t for t in trends if t.get("prev_rank") is None]
-    return up, down, firsts
+    up_sorted = sorted(movers, key=lambda x: x["change"], reverse=True)    # 상승 많을수록 먼저
+    down_sorted = sorted(movers, key=lambda x: x["change"])                # 하락 많을수록 먼저
+
+    # 차트인: 전일에 없었고 금일 top_window 이내
+    chart_ins = [t for t in trends if t["prev_rank"] is None and t["rank"] <= top_window]
+
+    # 랭크아웃: 전일 top_window 이내였고 금일 목록에 없음
+    today_names = {t.get("name") or t.get("raw_name") for t in today_items}
+    rank_out_names = [nm for nm in prev_top_names if nm not in today_names]
+    # prev_items에서 해당 이름과 순위 가져오기
+    rank_out = []
+    for p in (prev_items or []):
+        nm = p.get("name") or p.get("raw_name")
+        if nm in rank_out_names:
+            rank_out.append({"name": nm, "brand": p.get("brand"), "prev_rank": p.get("rank")})
+
+    in_out_count = len(chart_ins) + len(rank_out)
+
+    return up_sorted, down_sorted, chart_ins, rank_out, in_out_count
+
 
 # ---------------- Slack
 def send_slack_text(text):
@@ -401,22 +415,15 @@ def send_slack_text(text):
     except Exception:
         return False
 
-def compose_link_text(brand: str | None, name: str | None) -> str:
-    brand = (brand or "").strip()
-    name = (name or "").strip()
-    if not name:
-        return brand
-    if brand and name.lower().startswith(brand.lower()):
-        return name
-    if brand and name.lower().startswith((brand + " " + brand).lower()):
-        return name[len(brand):].lstrip()
-    return f"{brand} {name}".strip()
 
 # ---------------- 메인
 def main():
-    today_kst = kst_now().date()
+    now_kst = kst_now()
+    today_kst = now_kst.date()
+    yesterday_kst = (now_kst - timedelta(days=1)).date()
     logging.info("Build: oy-app gdrive+discount %s", today_kst.isoformat())
 
+    # 1) 스크래핑
     logging.info("Start scraping")
     items, sample = try_http_candidates()
     if not items:
@@ -431,9 +438,9 @@ def main():
         items = items[:MAX_ITEMS]
     items_filled = fill_ranks_and_fix(items)
 
-    # CSV 생성 (정가/할인가/할인율 포함)
+    # 2) CSV 생성 (정가/할인가/할인율 포함)
     os.makedirs(OUT_DIR, exist_ok=True)
-    fname = f"올리브영_랭킹_{today_kst.isoformat()}.csv"
+    fname_today = f"올리브영_랭킹_{today_kst.isoformat()}.csv"
     header = ["rank","brand","name","original_price","sale_price","discount_pct","url","raw_name"]
     lines = [",".join(header)]
 
@@ -458,25 +465,41 @@ def main():
     csv_data = ("\n".join(lines)).encode("utf-8")
 
     # 로컬 저장
-    path = os.path.join(OUT_DIR, fname)
+    path = os.path.join(OUT_DIR, fname_today)
     with open(path, "wb") as f:
         f.write(csv_data)
     logging.info("Saved CSV locally: %s", path)
 
-    # GDrive 업로드
+    # 3) GDrive 업로드
     drive_service = build_drive_service_oauth()
     if drive_service and GDRIVE_FOLDER_ID:
-        upload_csv_to_drive(drive_service, csv_data, fname, folder_id=GDRIVE_FOLDER_ID)
+        upload_csv_to_drive(drive_service, csv_data, fname_today, folder_id=GDRIVE_FOLDER_ID)
     else:
         logging.warning("OAuth Drive 미설정 또는 폴더ID 누락 -> 업로드 스킵")
 
-    # 전일 비교: 오늘 파일과 '다른' 최신 파일을 선택
+    # 4) 전일(csv) 로드 — **한국시간 기준 파일명**으로 정확히 찾기
     prev_items = None
     if drive_service and GDRIVE_FOLDER_ID:
-        prev_file = find_previous_csv_excluding_current(drive_service, GDRIVE_FOLDER_ID, fname)
-        if prev_file:
-            logging.info("Found previous CSV: %s (%s)", prev_file.get("name"), prev_file.get("createdTime"))
-            prev_csv_text = download_file_from_drive(drive_service, prev_file.get("id"))
+        fname_yesterday = f"올리브영_랭킹_{yesterday_kst.isoformat()}.csv"
+        y_file = find_csv_by_exact_name(drive_service, GDRIVE_FOLDER_ID, fname_yesterday)
+        # 혹시 없으면 최신(어제 업로드가 다른 시간대일 수 있으므로) 백업 전략: 최신 하나
+        if not y_file:
+            logging.warning("전일 파일명(%s)로 찾지 못함 → 최신 파일 백업 검색", fname_yesterday)
+            try:
+                q = f"mimeType='text/csv' and name contains '올리브영_랭킹' and '{GDRIVE_FOLDER_ID}' in parents"
+                r = drive_service.files().list(q=q, orderBy="createdTime desc", pageSize=2,
+                                               fields="files(id,name,createdTime)").execute()
+                files = r.get("files", [])
+                # 오늘 파일과 동일명인 것은 제외
+                for fmeta in files:
+                    if fmeta.get("name") != fname_today:
+                        y_file = fmeta
+                        break
+            except Exception as e:
+                logging.exception("백업 검색 실패: %s", e)
+
+        if y_file:
+            prev_csv_text = download_file_from_drive(drive_service, y_file.get("id"))
             if prev_csv_text:
                 prev_items = []
                 try:
@@ -489,18 +512,24 @@ def main():
                                 "rank": int(r.get("rank") or 0),
                                 "name": r.get("name"),
                                 "raw_name": r.get("raw_name"),
+                                "brand": r.get("brand"),
                             })
                         except Exception:
                             continue
                 except Exception as e:
                     logging.exception("CSV parse failed: %s", e)
 
-    up, down, firsts = analyze_trends(items_filled, prev_items or [])
+    # 5) 분석
+    up, down, chart_ins, rank_out, in_out_count = analyze_trends(items_filled, prev_items or [], TOP_WINDOW)
 
-    # Slack 메시지
+    # 6) Slack 메시지 구성 — 볼드 제목/소제목, 섹션 순서 변경, 포맷 변경, 화살표/기호 조정
+    # 제목
+    title = f"*올리브영 데일리 전체 랭킹 (국내)* ({now_kst.strftime('%Y-%m-%d %H:%M KST')})"
+    out_lines = [title]
+
+    # Top10
+    out_lines.append("*TOP 10*")
     top10 = items_filled[:10]
-    now_kst = kst_now().strftime("%Y-%m-%d %H:%M KST")
-    lines = [f"📊 올리브영 전체 랭킹(국내) ({now_kst})"]
     for it in top10:
         rank = it.get("rank")
         brand = it.get("brand") or ""
@@ -509,50 +538,66 @@ def main():
         pct = it.get("discount_pct")
         price_str = fmt_price_with_discount(sale, pct)
         url = it.get("url")
-
-        link_text = compose_link_text(brand, name)
         if url:
-            lines.append(f"{rank}. <{url}|{link_text}> — {price_str}")
+            out_lines.append(f"{rank}. <{url}|{brand} {name}> — {price_str}")
         else:
-            lines.append(f"{rank}. {link_text} — {price_str}")
+            out_lines.append(f"{rank}. {brand} {name} — {price_str}")
 
-    lines.append("")
-    lines.append("🔥 급상승 TOP3")
+    # 급상승 (TOP3, 제품명 + 이동)
+    def fmt_move_line(name, prev_rank, cur_rank):
+        if prev_rank is None:
+            return f"- {name} NEW → {cur_rank}위"
+        diff = prev_rank - cur_rank
+        arrow = "↑" if diff > 0 else "↓"
+        return f"- {name} {prev_rank}위 → {cur_rank}위 ({arrow}{abs(diff)})"
+
+    out_lines.append("")
+    out_lines.append("*🔥 급상승*")
     if up:
         for m in up[:3]:
-            change = m["prev_rank"] - m["rank"]
-            lines.append(f"- {m.get('brand')}: {m.get('prev_rank')}위 → {m.get('rank')}위 (+{change})")
-            sample = m.get("sample_product") or m.get("name")
-            if sample:
-                lines.append(f"  ▶ {sample}")
+            # 요청대로 '브랜드명 별도라인' 제거 → 상품명 라인만
+            name = m.get("sample_product") or m.get("name")
+            out_lines.append(fmt_move_line(name, m.get("prev_rank"), m.get("rank")))
     else:
-        lines.append("- (이전 데이터 없음)")
+        out_lines.append("- (이전 데이터 없음)")
 
-    lines.append("")
-    lines.append("📉 급하락 TOP3")
-    downs = [m for m in down if m["change"] < 0][:3]
-    if downs:
-        for m in downs:
-            change = m["rank"] - m["prev_rank"]
-            lines.append(f"- {m.get('brand')}: {m.get('prev_rank')}위 → {m.get('rank')}위 (-{change})")
-            sample = m.get("sample_product") or m.get("name")
-            if sample:
-                lines.append(f"  ▶ {sample}")
+    # 뉴랭커(차트인)
+    out_lines.append("")
+    out_lines.append("*🆕 뉴랭커*")
+    if chart_ins:
+        for t in chart_ins[:3]:
+            # 차트인 포맷: "이름 NEW → N위" + 보조 기호는 ↳(선호)
+            out_lines.append(f"- {t.get('name')} NEW → {t.get('rank')}위")
     else:
-        lines.append("- (이전 데이터 없음)")
+        out_lines.append("- (변동 없음)")
 
-    lines.append("")
-    lines.append("🆕 첫 등장/주목 신상품")
-    if firsts:
-        for f in firsts[:3]:
-            lines.append(f"- {f.get('brand')}: 첫 등장 {f.get('rank')}위")
-            lines.append(f"  ▶ {f.get('sample_product')}")
-    else:
-        lines.append("- (신규 없음)")
+    # 급하락 (TOP5) + 랭크아웃 표기
+    out_lines.append("")
+    out_lines.append("*📉 급하락*")
+    showed = 0
+    for m in down:
+        if showed >= 5:
+            break
+        diff = m["rank"] - m["prev_rank"]
+        if diff > 0:  # 하락
+            name = m.get("sample_product") or m.get("name")
+            out_lines.append(f"- {name} {m['prev_rank']}위 → {m['rank']}위 (↓{diff})")
+            showed += 1
+    # 랭크아웃
+    if rank_out:
+        for ro in rank_out:
+            out_lines.append(f"- {ro.get('name')} {ro.get('prev_rank')}위 → OUT")
 
-    send_slack_text("\n".join(lines))
+    # 랭크 인&아웃 개수
+    out_lines.append("")
+    out_lines.append("*↔ 랭크 인&아웃*")
+    out_lines.append(f"{in_out_count}개의 제품이 인&아웃 되었습니다.")
+
+    # 전송
+    send_slack_text("\n".join(out_lines))
     logging.info("Done.")
     return 0
+
 
 if __name__ == "__main__":
     exit(main())
