@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# app.py — OAuth(사용자 계정) 기반 GDrive 업로드 + 할인율 계산/표시 (브랜드 중복 제거)
+# app.py — OAuth(사용자 계정) 기반 GDrive 업로드 + 할인율 계산/표시 (전일 비교 & 이름 정규화 매칭, 브랜드 중복 제거)
 
 import os
 import re
@@ -40,7 +40,6 @@ MAX_ITEMS = 100
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s")
 
-
 # ---------------- 유틸
 def kst_now():
     return datetime.now(timezone.utc) + timedelta(hours=9)
@@ -76,6 +75,14 @@ def fmt_price_with_discount(sale: int | None, disc_pct: int | None) -> str:
         return f"{sale:,}원"
     return f"{sale:,}원 ({disc_pct}%)"
 
+# 비교용 이름 정규화(공백/특수문자 제거, 소문자화)
+_norm_pat = re.compile(r"[^\w가-힣]+", re.UNICODE)
+def norm_key(s: str | None) -> str:
+    if not s:
+        return ""
+    s = s.lower().strip()
+    s = _norm_pat.sub("", s)  # 영문/숫자/한글 외 제거
+    return s
 
 # ---------------- 파싱/정제
 def clean_title(raw: str) -> str:
@@ -153,6 +160,7 @@ def parse_html_products(html: str):
             results.append({
                 "raw_name": raw_name,
                 "name": cleaned,
+                "name_key": norm_key(cleaned),  # 비교용 키
                 "brand": brand,
                 "url": href,
                 "original_price": original_price,
@@ -215,6 +223,7 @@ def try_http_candidates():
                                 out.append({
                                     "raw_name": name_val,
                                     "name": cleaned,
+                                    "name_key": norm_key(cleaned),
                                     "brand": brand,
                                     "url": url_val,
                                     "original_price": original_price,
@@ -272,7 +281,6 @@ def fill_ranks_and_fix(items):
             break
     return out
 
-
 # ---------------- Google Drive (OAuth)
 def build_drive_service_oauth():
     if not (GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET and GOOGLE_REFRESH_TOKEN):
@@ -313,12 +321,21 @@ def find_latest_csv_in_drive(service, folder_id):
     try:
         q = f"mimeType='text/csv' and name contains '올리브영_랭킹' and '{folder_id}' in parents" if folder_id \
             else "mimeType='text/csv' and name contains '올리브영_랭킹'"
-        res = service.files().list(q=q, orderBy="createdTime desc", pageSize=10, fields="files(id,name,createdTime)").execute()
-        files = res.get("files", [])
-        return files[0] if files else None
+        res = service.files().list(q=q, orderBy="createdTime desc", pageSize=20,
+                                   fields="files(id,name,createdTime)").execute()
+        files = res.get("files", []) or []
+        return files
     except Exception as e:
         logging.exception("find_latest_csv_in_drive error: %s", e)
-        return None
+        return []
+
+def find_previous_csv_excluding_current(service, folder_id, current_filename):
+    """오늘 파일명과 다른 가장 최근 CSV 1개"""
+    files = find_latest_csv_in_drive(service, folder_id)
+    for f in files:
+        if f.get("name") != current_filename:
+            return f
+    return None
 
 def download_file_from_drive(service, file_id):
     try:
@@ -334,22 +351,23 @@ def download_file_from_drive(service, file_id):
         logging.exception("download_file_from_drive error: %s", e)
         return None
 
-
 # ---------------- 분석(급상승/급하락/신규)
 def analyze_trends(today_items, prev_items):
     prev_map = {}
     for p in (prev_items or []):
-        key = p.get("name") or p.get("raw_name")
+        key = norm_key(p.get("name") or p.get("raw_name"))
+        if not key:
+            continue
         prev_map[key] = p.get("rank")
 
     trends = []
     for it in today_items:
-        key = it.get("name") or it.get("raw_name")
+        key = it.get("name_key") or norm_key(it.get("name") or it.get("raw_name"))
         prev_rank = prev_map.get(key)
         if prev_rank:
-            change = prev_rank - it['rank']
+            change = prev_rank - it['rank']  # +: 상승, -: 하락
             trends.append({
-                "name": key,
+                "name": it.get("name"),
                 "brand": it.get("brand"),
                 "rank": it['rank'],
                 "prev_rank": prev_rank,
@@ -358,7 +376,7 @@ def analyze_trends(today_items, prev_items):
             })
         else:
             trends.append({
-                "name": key,
+                "name": it.get("name"),
                 "brand": it.get("brand"),
                 "rank": it['rank'],
                 "prev_rank": None,
@@ -372,7 +390,6 @@ def analyze_trends(today_items, prev_items):
     firsts = [t for t in trends if t.get("prev_rank") is None]
     return up, down, firsts
 
-
 # ---------------- Slack
 def send_slack_text(text):
     if not SLACK_WEBHOOK:
@@ -385,11 +402,6 @@ def send_slack_text(text):
         return False
 
 def compose_link_text(brand: str | None, name: str | None) -> str:
-    """
-    슬랙 링크 텍스트 생성:
-    - name이 brand로 시작하면 brand를 중복으로 붙이지 않음
-    - '브랜드 브랜드 ...' 같은 중복 시작도 한 번 줄여서 표시
-    """
     brand = (brand or "").strip()
     name = (name or "").strip()
     if not name:
@@ -399,7 +411,6 @@ def compose_link_text(brand: str | None, name: str | None) -> str:
     if brand and name.lower().startswith((brand + " " + brand).lower()):
         return name[len(brand):].lstrip()
     return f"{brand} {name}".strip()
-
 
 # ---------------- 메인
 def main():
@@ -459,12 +470,13 @@ def main():
     else:
         logging.warning("OAuth Drive 미설정 또는 폴더ID 누락 -> 업로드 스킵")
 
-    # 전일 비교 (현 구조 유지)
+    # 전일 비교: 오늘 파일과 '다른' 최신 파일을 선택
     prev_items = None
     if drive_service and GDRIVE_FOLDER_ID:
-        latest = find_latest_csv_in_drive(drive_service, GDRIVE_FOLDER_ID)
-        if latest and latest.get("name") != fname:
-            prev_csv_text = download_file_from_drive(drive_service, latest.get("id"))
+        prev_file = find_previous_csv_excluding_current(drive_service, GDRIVE_FOLDER_ID, fname)
+        if prev_file:
+            logging.info("Found previous CSV: %s (%s)", prev_file.get("name"), prev_file.get("createdTime"))
+            prev_csv_text = download_file_from_drive(drive_service, prev_file.get("id"))
             if prev_csv_text:
                 prev_items = []
                 try:
@@ -473,7 +485,11 @@ def main():
                     rdr = csv.DictReader(sio)
                     for r in rdr:
                         try:
-                            prev_items.append({"rank": int(r.get("rank") or 0), "name": r.get("name"), "raw_name": r.get("raw_name")})
+                            prev_items.append({
+                                "rank": int(r.get("rank") or 0),
+                                "name": r.get("name"),
+                                "raw_name": r.get("raw_name"),
+                            })
                         except Exception:
                             continue
                 except Exception as e:
@@ -481,7 +497,7 @@ def main():
 
     up, down, firsts = analyze_trends(items_filled, prev_items or [])
 
-    # Slack 메시지 (브랜드 중복 제거 + "9,950원 (50%)")
+    # Slack 메시지
     top10 = items_filled[:10]
     now_kst = kst_now().strftime("%Y-%m-%d %H:%M KST")
     lines = [f"📊 올리브영 전체 랭킹(국내) ({now_kst})"]
@@ -537,7 +553,6 @@ def main():
     send_slack_text("\n".join(lines))
     logging.info("Done.")
     return 0
-
 
 if __name__ == "__main__":
     exit(main())
