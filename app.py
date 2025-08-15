@@ -75,7 +75,9 @@ def fmt_price_with_discount(sale: int | None, disc_pct: int | None) -> str:
         return ""
     if disc_pct is None:
         return f"{sale:,}원"
-    return f"{sale:,}원 ({disc_pct}%)"
+    # 퍼센트 앞에 ↓ 붙이기
+    return f"{sale:,}원 (↓{disc_pct}%)"
+
 
 
 # ---------------- 파싱/정제
@@ -532,7 +534,6 @@ def main():
     top10 = items_filled[:10]
     for it in top10:
         rank = it.get("rank")
-        brand = it.get("brand") or ""
         name = it.get("name") or ""
         sale = it.get("sale_price")
         pct = it.get("discount_pct")
