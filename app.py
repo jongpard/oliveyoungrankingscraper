@@ -540,9 +540,9 @@ def main():
         price_str = fmt_price_with_discount(sale, pct)
         url = it.get("url")
         if url:
-            out_lines.append(f"{rank}. <{url}|{brand} {name}> — {price_str}")
+            out_lines.append(f"{rank}. <{url}|{name}> — {price_str}")
         else:
-            out_lines.append(f"{rank}. {brand} {name} — {price_str}")
+            out_lines.append(f"{rank}. {name} — {price_str}")
 
     # 급상승 (TOP3, 제품명 + 이동)
     def fmt_move_line(name, prev_rank, cur_rank):
