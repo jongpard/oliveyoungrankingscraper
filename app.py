@@ -526,7 +526,7 @@ def main():
 
     # 6) Slack 메시지 구성 — 볼드 제목/소제목, 섹션 순서 변경, 포맷 변경, 화살표/기호 조정
     # 제목
-    title = f"*올리브영 데일리 전체 랭킹 (국내)* ({now_kst.strftime('%Y-%m-%d %H:%M KST')})"
+    title = f"*올리브영 데일리 전체 랭킹 100 (국내)* ({now_kst.strftime('%Y-%m-%d %H:%M KST')})"
     out_lines = [title]
 
     # Top10
