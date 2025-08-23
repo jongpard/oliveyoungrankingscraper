@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# app.py — GDrive(OAuth, 사용자 계정) 업로드 + 할인율/전일비 분석(한국시간) + Slack 포맷 개선
+# app.py — GDrive(OAuth, 사용자 계정) 업로드 + 할인율/전일비 분석(한국시간) + Slack 포맷 개선(국내 OY)
 
 import os
 import re
+import csv
 import json
 import logging
 from io import BytesIO, StringIO
+from typing import List, Dict, Optional
 from datetime import datetime, timedelta, timezone
+from urllib.parse import urlparse, parse_qs
 
 import requests
 from requests.adapters import HTTPAdapter
@@ -37,14 +40,14 @@ GDRIVE_FOLDER_ID = os.environ.get("GDRIVE_FOLDER_ID", "").strip()
 
 OUT_DIR = "rankings"
 MAX_ITEMS = 100        # 크롤링 최대 아이템
-TOP_WINDOW = 30        # analyze_trends용(유지). 슬랙 메시지는 별도 규칙 사용.
 
+KST = timezone(timedelta(hours=9))
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s")
 
 
 # ---------------- 유틸
-def kst_now():
-    return datetime.now(timezone.utc) + timedelta(hours=9)
+def kst_now() -> datetime:
+    return datetime.now(KST)
 
 def make_session():
     s = requests.Session()
@@ -59,7 +62,7 @@ def make_session():
 
 _won_pat = re.compile(r"[\d,]+")
 
-def parse_won_to_int(s: str | None) -> int | None:
+def parse_won_to_int(s: Optional[str]) -> Optional[int]:
     if not s:
         return None
     m = _won_pat.search(s)
@@ -70,13 +73,40 @@ def parse_won_to_int(s: str | None) -> int | None:
     except Exception:
         return None
 
-def fmt_price_with_discount(sale: int | None, disc_pct: int | None) -> str:
+def fmt_price_with_discount(sale: Optional[int], disc_pct: Optional[int]) -> str:
     if not sale:
         return ""
     if disc_pct is None:
         return f"{sale:,}원"
-    # 퍼센트 앞에 ↓ 붙이기
     return f"{sale:,}원 (↓{disc_pct}%)"
+
+def _slack_escape(s: Optional[str]) -> str:
+    if s is None:
+        return ""
+    return str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+def _clean_text(s: Optional[str]) -> str:
+    # 연속 공백 정규화
+    return re.sub(r"\s+", " ", (s or "")).strip()
+
+def _oy_goodsno_from_url(u: Optional[str]) -> str:
+    """URL에서 goodsNo만 추출해 안정 키로 사용"""
+    if not u:
+        return ""
+    try:
+        return parse_qs(urlparse(u).query).get("goodsNo", [""])[0]
+    except Exception:
+        return ""
+
+def _oy_key(it: Dict) -> str:
+    """키 생성: URL 정규화(goodsNo) 우선, 없으면 name/raw_name"""
+    g = _oy_goodsno_from_url((it.get("url") or "").strip())
+    if g:
+        return f"g:{g}"
+    return (it.get("name") or it.get("raw_name") or "").strip()
+
+def _link(name: str, url: Optional[str]) -> str:
+    return f"<{url}|{_slack_escape(name)}>" if url else _slack_escape(name)
 
 
 # ---------------- 파싱/정제
@@ -101,7 +131,7 @@ def extract_brand_from_name(name: str) -> str:
         return cand
     return name
 
-def parse_html_products(html: str):
+def parse_html_products(html: str) -> List[Dict]:
     soup = BeautifulSoup(html, "html.parser")
     candidate_selectors = [
         "ul.cate_prd_list li",
@@ -110,7 +140,7 @@ def parse_html_products(html: str):
         ".ranking_list li",
         ".rank_item",
     ]
-    results = []
+    results: List[Dict] = []
     for sel in candidate_selectors:
         els = soup.select(sel)
         if not els:
@@ -194,7 +224,7 @@ def try_http_candidates():
                 if isinstance(data, dict):
                     for k in ["BestProductList", "list", "rows", "items", "bestList", "result"]:
                         if k in data and isinstance(data[k], list) and data[k]:
-                            out = []
+                            out: List[Dict] = []
                             for it in data[k][:MAX_ITEMS]:
                                 name_val = it.get("prdNm") or it.get("prodName") or it.get("goodsNm") or it.get("name")
                                 brand_val = it.get("brandNm") or it.get("brand")
@@ -263,8 +293,8 @@ def try_playwright_render(url="https://www.oliveyoung.co.kr/store/main/getBestLi
         logging.exception("Playwright render error: %s", e)
         return None, None
 
-def fill_ranks_and_fix(items):
-    out = []
+def fill_ranks_and_fix(items: List[Dict]) -> List[Dict]:
+    out: List[Dict] = []
     rank = 1
     for it in items:
         it["rank"] = rank
@@ -340,62 +370,8 @@ def download_file_from_drive(service, file_id):
         return None
 
 
-# ---------------- 분석(유지; 슬랙 빌더는 별도 규칙 사용)
-def analyze_trends(today_items, prev_items, top_window=TOP_WINDOW):
-    """이름 기준 매칭. 전일 순위(prev_rank)와 금일 순위(rank)를 비교."""
-    prev_map = {}
-    prev_top_names = set()
-    for p in (prev_items or []):
-        key = p.get("name") or p.get("raw_name")
-        r = p.get("rank")
-        prev_map[key] = r
-        if r and r <= top_window:
-            prev_top_names.add(key)
-
-    trends = []
-    for it in today_items:
-        key = it.get("name") or it.get("raw_name")
-        prev_rank = prev_map.get(key)
-        if prev_rank:
-            change = prev_rank - it['rank']  # +면 상승, -면 하락
-            trends.append({
-                "name": key,
-                "brand": it.get("brand"),
-                "rank": it['rank'],
-                "prev_rank": prev_rank,
-                "change": change,
-                "sample_product": it.get("name")
-            })
-        else:
-            trends.append({
-                "name": key,
-                "brand": it.get("brand"),
-                "rank": it['rank'],
-                "prev_rank": None,
-                "change": None,
-                "sample_product": it.get("name")
-            })
-
-    movers = [t for t in trends if t.get("prev_rank")]
-    up_sorted = sorted(movers, key=lambda x: x["change"], reverse=True)
-    down_sorted = sorted(movers, key=lambda x: x["change"])
-
-    chart_ins = [t for t in trends if t["prev_rank"] is None and t["rank"] <= top_window]
-
-    today_names = {t.get("name") or t.get("raw_name") for t in today_items}
-    rank_out_names = [nm for nm in prev_top_names if nm not in today_names]
-    rank_out = []
-    for p in (prev_items or []):
-        nm = p.get("name") or p.get("raw_name")
-        if nm in rank_out_names:
-            rank_out.append({"name": nm, "brand": p.get("brand"), "prev_rank": p.get("rank")})
-
-    in_out_count = len(chart_ins) + len(rank_out)
-    return up_sorted, down_sorted, chart_ins, rank_out, in_out_count
-
-
 # ---------------- Slack 기본 전송
-def send_slack_text(text):
+def send_slack_text(text: str) -> bool:
     if not SLACK_WEBHOOK:
         logging.warning("No SLACK_WEBHOOK configured.")
         return False
@@ -406,51 +382,7 @@ def send_slack_text(text):
         return False
 
 
-# =========================
-# OliveYoung (국내) Slack 메시지 – URL 정규화(goodsNo), 인&아웃 정확 계산
-# =========================
-
-from urllib.parse import urlparse, parse_qs
-from typing import List, Dict, Optional
-from datetime import datetime, timedelta, timezone
-
-KST = timezone(timedelta(hours=9))
-
-def _slack_escape(s: Optional[str]) -> str:
-    if s is None:
-        return ""
-    return str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-
-def _clean_text(s: Optional[str]) -> str:
-    return (s or "").strip()
-
-def _oy_goodsno_from_url(u: Optional[str]) -> str:
-    """URL에서 goodsNo만 뽑아 안정 키로 사용 (링크는 그대로 유지)"""
-    if not u:
-        return ""
-    try:
-        return parse_qs(urlparse(u).query).get("goodsNo", [""])[0]
-    except Exception:
-        return ""
-
-def _oy_key(it: Dict) -> str:
-    """키 생성: goodsNo 우선, 없으면 name 계열."""
-    u = (it.get("url") or "").strip()
-    g = _oy_goodsno_from_url(u)
-    if g:
-        return f"g:{g}"
-    return (it.get("name") or it.get("raw_name") or "").strip()
-
-def _link(name: str, url: Optional[str]) -> str:
-    n = _slack_escape(name)
-    return f"<{url}|{n}>" if url else n
-
-def _fmt_price(v) -> str:
-    try:
-        return f"{int(v):,}원"
-    except Exception:
-        return str(v or "")
-
+# ---------------- Slack 메시지(국내판)
 def build_slack_message_kor(
     date_str: str,
     today_items: List[Dict],
@@ -458,14 +390,15 @@ def build_slack_message_kor(
     total_count: int
 ) -> str:
     """
-    올리브영(국내) 슬랙 메시지:
-    - TOP 10: 배지(↑/↓/(-)/(new))
-    - 급상승/급하락: |Δrank| >= 10, 각 5개
-    - 뉴랭커: 5개
-    - OUT: 5개 (전일 ≤100에서 이탈, 전일 URL로 링크)
-    - 랭크 인&아웃: Top100 교체 수(대칭차집합/2)
+    규칙:
+      - TOP10: 전일 대비 배지 (↑n / ↓n / (-) / (new))
+      - 🔥 급상승 / 📉 급하락: Top100 전체, 변동 10계단 이상, 각 5개
+      - 🆕 뉴랭커: 최대 5개
+      - ❌ OUT: 전일 ≤100 이고 오늘 Top100에 없는 항목, 최대 5개 (전일 URL로 링크)
+      - ↔ 인&아웃: Top100 교체 수(대칭차집합/2, goodsNo 기준)
     """
-    # 전일 rank / url 맵 (key = _oy_key)
+
+    # 전일 rank/url 맵 (key = goodsNo 기반의 _oy_key)
     prev_rank_map: Dict[str, int] = {}
     prev_url_map: Dict[str, str] = {}
     for p in (prev_items or []):
@@ -473,14 +406,13 @@ def build_slack_message_kor(
         if not k:
             continue
         try:
-            r = int(p.get("rank") or 0)
+            prev_rank_map[k] = int(p.get("rank") or 0)
         except Exception:
-            r = 0
-        prev_rank_map[k] = r
+            continue
         if p.get("url"):
             prev_url_map[k] = p["url"]
 
-    # 오늘 key, rank, url, name 맵
+    # 오늘 key → rank/url/name
     today_key_rank: Dict[str, int] = {}
     today_key_url: Dict[str, str] = {}
     today_key_name: Dict[str, str] = {}
@@ -496,7 +428,7 @@ def build_slack_message_kor(
         today_key_url[k]  = t.get("url") or ""
         today_key_name[k] = t.get("name") or t.get("raw_name") or ""
 
-    # TOP 10 (배지)
+    # ---------- TOP10 ----------
     top10_lines: List[str] = []
     for t in (today_items or [])[:10]:
         k   = _oy_key(t)
@@ -516,80 +448,85 @@ def build_slack_message_kor(
                 badge = "(-)"
         else:
             badge = "(new)"
-        top10_lines.append(f"{cur}. {badge} {_link(nm, url)} — {_fmt_price(t.get('sale_price') or t.get('price'))}")
+        price_txt = fmt_price_with_discount(t.get("sale_price"), t.get("discount_pct"))
+        top10_lines.append(f"{cur}. {badge} {_link(nm, url)} — {price_txt}")
 
-    # 급상승 / 급하락 / 뉴랭커 / OUT 후보 계산
-    ups, downs, newcomers, outs = [], [], [], []
+    # 전일 데이터 없으면 TOP10만
+    if not prev_rank_map:
+        header = f"*올리브영 국내 Top 100* ({date_str})"
+        return "\n".join([header, "", "*TOP 10*", *(top10_lines or ["- 데이터 없음"])])
 
-    for k, cur in today_key_rank.items():
-        prev = prev_rank_map.get(k)
-        nm   = today_key_name.get(k, "")
-        url  = today_key_url.get(k, "")
-        if prev is None:
-            # NEW (전일 Top100 밖 또는 미존재)
-            newcomers.append({"name": nm, "url": url, "rank": cur})
-        else:
-            # 양수면 상승(순위 숫자 감소), 음수면 하락(순위 숫자 증가)
-            delta = prev - cur
-            if delta >= 10:
-                ups.append({"name": nm, "url": url, "prev_rank": prev, "rank": cur, "change": delta})
-            elif delta <= -10:
-                downs.append({"name": nm, "url": url, "prev_rank": prev, "rank": cur, "change": delta})
-
-    # OUT: 전일 ≤100 이고 오늘 Top100에서 사라진 키
+    # ---------- Top100 비교 ----------
     today_keys = set(today_key_rank.keys())
-    for k, pr in prev_rank_map.items():
+    prev_keys  = set(prev_rank_map.keys())
+    common     = today_keys & prev_keys
+
+    # 급상승/급하락 (±10)
+    ups, downs = [], []
+    for k in common:
+        pr = int(prev_rank_map[k])
+        cr = int(today_key_rank[k])
+        diff = pr - cr
+        if diff >= 10:
+            ups.append((diff, cr, pr, k))
+        elif diff <= -10:
+            downs.append((-diff, cr, pr, k))  # 절댓값
+
+    ups.sort(key=lambda x: (-x[0], x[1], x[2], x[3]))
+    downs.sort(key=lambda x: (-x[0], x[1], x[2], x[3]))
+
+    ups_lines   = [f"- {_link(today_key_name.get(k,''), today_key_url.get(k))} {pr}위 → {cr}위 (↑{imp})"
+                   for imp, cr, pr, k in ups[:5]] or ["- 해당 없음"]
+    downs_lines = [f"- {_link(today_key_name.get(k,''), today_key_url.get(k))} {pr}위 → {cr}위 (↓{drop})"
+                   for drop, cr, pr, k in downs[:5]] or ["- 해당 없음"]
+
+    # 뉴랭커
+    newcomers = []
+    for k in today_keys - prev_keys:
+        r = int(today_key_rank.get(k) or 0)
+        if 1 <= r <= 100:
+            newcomers.append((r, f"- {_link(today_key_name.get(k,''), today_key_url.get(k))} NEW → {r}위"))
+    newcomers.sort(key=lambda x: x[0])
+    newcomer_lines = [ln for _, ln in newcomers[:5]] or ["- 해당 없음"]
+
+    # OUT(전일 ≤100, 오늘 Top100 미포함)
+    outs = []
+    for k, pr in sorted(prev_rank_map.items(), key=lambda kv: kv[1]):
         if 1 <= pr <= 100 and k not in today_keys:
-            nm  = _clean_text( (prev_items and (_clean_text((next((p.get("name") or p.get("raw_name") or "") for p in prev_items if _oy_key(p)==k), "")))) or today_key_name.get(k) or "" )
-            url = prev_url_map.get(k, "")
-            outs.append({"name": nm, "url": url, "rank": pr})
+            outs.append((pr, f"- {_link(today_key_name.get(k, ''), prev_url_map.get(k))} {pr}위 → OUT"))
+    out_lines = [ln for _, ln in outs[:5]] or ["- 해당 없음"]
 
-    # 정렬 및 상한
-    ups.sort(key=lambda x: (-int(x["change"]), int(x["rank"]), int(x["prev_rank"])))
-    downs.sort(key=lambda x: (abs(int(x["change"])) * -1, int(x["rank"]), int(x["prev_rank"])))
-    newcomers.sort(key=lambda x: int(x["rank"]))
-    outs.sort(key=lambda x: int(x["rank"]))
-
-    ups_lines       = [f"- {_link(u['name'], u.get('url'))} {u['prev_rank']}위 → {u['rank']}위 (↑{u['change']})" for u in ups[:5]] or ["- (해당 없음)"]
-    newcomers_lines = [f"- {_link(n['name'], n.get('url'))} NEW → {n['rank']}위" for n in newcomers[:5]] or ["- (해당 없음)"]
-    downs_lines     = [f"- {_link(d['name'], d.get('url'))} {d['prev_rank']}위 → {d['rank']}위 (↓{abs(int(d['change']))})" for d in downs[:5]] or ["- (해당 없음)"]
-    outs_lines      = [f"- {_link(o['name'], o.get('url'))} {o['rank']}위 → OUT" for o in outs[:5]] or ["- (해당 없음)"]
-
-    # 인&아웃(교체 수) – Top100 대칭차집합/2 (goodsNo 기준)
-    today_top_keys = {_oy_key(x) for x in (today_items or [])[:100] if _oy_key(x)}
-    prev_top_keys  = {k for k, r in prev_rank_map.items() if r and r <= 100}
+    # 인&아웃(교체 수) – Top100 대칭차집합/2
+    today_top_keys = {k for k, r in today_key_rank.items() if 1 <= r <= 100}
+    prev_top_keys  = {k for k, r in prev_rank_map.items() if 1 <= r <= 100}
     inout_count    = len(today_top_keys ^ prev_top_keys) // 2
 
     # 메시지 조립
-    now_kst = datetime.now(KST).strftime("%Y-%m-%d %H:%M KST")
-    header  = f"*올리브영 국내 Top 100* ({now_kst})"
-    lines: List[str] = [header, "", "*TOP 10*"]
-    lines.extend(top10_lines or ["- 데이터 없음"])
-
-    lines.append("\n*🔥 급상승*")
-    lines.extend(ups_lines)
-
-    lines.append("\n*🆕 뉴랭커*")
-    lines.extend(newcomers_lines)
-
-    lines.append("\n*📉 급하락*")
-    lines.extend(downs_lines)
-
-    lines.append("\n*❌ OUT*")
-    lines.extend(outs_lines)
-
-    lines.append("\n*↔ 랭크 인&아웃*")
-    lines.append(f"{inout_count}개의 제품이 인&아웃 되었습니다.")
-
+    header = f"*올리브영 국내 Top 100* ({date_str})"
+    lines: List[str] = [
+        header, "",
+        "*TOP 10*", *(top10_lines or ["- 데이터 없음"]),
+        "",
+        "*🔥 급상승*", *ups_lines,
+        "",
+        "*🆕 뉴랭커*", *newcomer_lines,
+        "",
+        "*📉 급하락*", *downs_lines,
+        "",
+        "*❌ OUT*", *out_lines,
+        "",
+        "*↔ 랭크 인&아웃*",
+        f"{inout_count}개의 제품이 인&아웃 되었습니다.",
+    ]
     return "\n".join(lines)
 
 
 # ---------------- 메인
-def main():
-    now_kst = kst_now()
-    today_kst = now_kst.date()
-    yesterday_kst = (now_kst - timedelta(days=1)).date()
-    logging.info("Build: oy-app gdrive+discount %s", today_kst.isoformat())
+def main() -> int:
+    now = kst_now()
+    today_ymd = now.date()
+    yesterday_ymd = (now - timedelta(days=1)).date()
+    logging.info("Build: oy-app gdrive+discount %s", today_ymd.isoformat())
 
     # 1) 스크래핑
     logging.info("Start scraping")
@@ -606,14 +543,14 @@ def main():
         items = items[:MAX_ITEMS]
     items_filled = fill_ranks_and_fix(items)
 
-    # 2) CSV 생성 (정가/할인가/할인율 포함)
+    # 2) CSV 생성
     os.makedirs(OUT_DIR, exist_ok=True)
-    fname_today = f"올리브영_랭킹_{today_kst.isoformat()}.csv"
+    fname_today = f"올리브영_랭킹_{today_ymd.isoformat()}.csv"
     header = ["rank","brand","name","original_price","sale_price","discount_pct","url","raw_name"]
-    lines = [",".join(header)]
+    rows = [",".join(header)]
 
     def q(s):
-        if s is None: 
+        if s is None:
             return ""
         s = str(s).replace('"','""')
         if any(c in s for c in [',','\n','"']):
@@ -621,7 +558,7 @@ def main():
         return s
 
     for it in items_filled:
-        row = [
+        rows.append(",".join([
             q(it.get("rank")),
             q(it.get("brand")),
             q(it.get("name")),
@@ -630,30 +567,29 @@ def main():
             q(it.get("discount_pct") if it.get("discount_pct") is not None else ""),
             q(it.get("url")),
             q(it.get("raw_name")),
-        ]
-        lines.append(",".join(row))
-    csv_data = ("\n".join(lines)).encode("utf-8")
+        ]))
+    csv_bytes = ("\n".join(rows)).encode("utf-8")
 
     # 로컬 저장
     path = os.path.join(OUT_DIR, fname_today)
     with open(path, "wb") as f:
-        f.write(csv_data)
+        f.write(csv_bytes)
     logging.info("Saved CSV locally: %s", path)
 
     # 3) GDrive 업로드
     drive_service = build_drive_service_oauth()
     if drive_service and GDRIVE_FOLDER_ID:
-        upload_csv_to_drive(drive_service, csv_data, fname_today, folder_id=GDRIVE_FOLDER_ID)
+        upload_csv_to_drive(drive_service, csv_bytes, fname_today, folder_id=GDRIVE_FOLDER_ID)
     else:
         logging.warning("OAuth Drive 미설정 또는 폴더ID 누락 -> 업로드 스킵")
 
-    # 4) 전일(csv) 로드 — **한국시간 기준 파일명**으로 정확히 찾기
-    prev_items = None
+    # 4) 전일(csv) 로드 — 한국시간 파일명 기준
+    prev_items: List[Dict] = []
     if drive_service and GDRIVE_FOLDER_ID:
-        fname_yesterday = f"올리브영_랭킹_{yesterday_kst.isoformat()}.csv"
+        fname_yesterday = f"올리브영_랭킹_{yesterday_ymd.isoformat()}.csv"
         y_file = find_csv_by_exact_name(drive_service, GDRIVE_FOLDER_ID, fname_yesterday)
         if not y_file:
-            logging.warning("전일 파일명(%s)로 찾지 못함 → 최신 파일 백업 검색", fname_yesterday)
+            logging.warning("전일 파일명(%s)로 찾지 못함 → 최신 CSV 백업 검색", fname_yesterday)
             try:
                 q = f"mimeType='text/csv' and name contains '올리브영_랭킹' and '{GDRIVE_FOLDER_ID}' in parents"
                 r = drive_service.files().list(q=q, orderBy="createdTime desc", pageSize=2,
@@ -665,43 +601,36 @@ def main():
                         break
             except Exception as e:
                 logging.exception("백업 검색 실패: %s", e)
-
         if y_file:
             prev_csv_text = download_file_from_drive(drive_service, y_file.get("id"))
             if prev_csv_text:
-                prev_items = []
-                try:
-                    import csv
-                    sio = StringIO(prev_csv_text)
-                    rdr = csv.DictReader(sio)
-                    for r in rdr:
-                        try:
-                            prev_items.append({
-                                "rank": int(r.get("rank") or 0),
-                                "name": r.get("name"),
-                                "raw_name": r.get("raw_name"),
-                                "brand": r.get("brand"),
-                            })
-                        except Exception:
-                            continue
-                except Exception as e:
-                    logging.exception("CSV parse failed: %s", e)
+                sio = StringIO(prev_csv_text)
+                rdr = csv.DictReader(sio)
+                for r in rdr:
+                    try:
+                        prev_items.append({
+                            "rank": int(r.get("rank") or 0),
+                            "name": r.get("name"),
+                            "raw_name": r.get("raw_name"),
+                            "brand": r.get("brand"),
+                            "url": r.get("url"),   # OUT 링크용
+                        })
+                    except Exception:
+                        continue
 
-# 현재 시각(KST) → "YYYY-MM-DD HH:MM KST"
-now_kst = datetime.now(KST)
-date_str = now_kst.strftime("%Y-%m-%d %H:%M KST")
-
-# 슬랙 텍스트 생성
-text = build_slack_message_kor(
-    date_str=date_str,          # ← 표시용 날짜 문자열 (공백 포함)
-    today_items=items,          # 오늘 랭킹 100개
-    prev_items=prev_items or [],# 전일 랭킹
-    total_count=len(items),     # 총 수집 개수
-)
+    # 5) 슬랙 메시지 생성 + 전송
+    date_str = now.strftime("%Y-%m-%d %H:%M KST")
+    text = build_slack_message_kor(
+        date_str=date_str,
+        today_items=items_filled,
+        prev_items=prev_items or [],
+        total_count=len(items_filled),
+    )
+    send_slack_text(text)
 
     logging.info("Done.")
     return 0
 
 
 if __name__ == "__main__":
-    exit(main())
+    raise SystemExit(main())
