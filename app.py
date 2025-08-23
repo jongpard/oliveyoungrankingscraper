@@ -406,127 +406,181 @@ def send_slack_text(text):
         return False
 
 
-# ---------------- Slack 메시지(국내판 · 글로벌과 동일 규칙)
-def _oy_key(it: dict) -> str:
-    """전일/금일 매칭 키: 이름 우선, 없으면 raw_name"""
+# =========================
+# OliveYoung (국내) Slack 메시지 – URL 정규화(goodsNo), 인&아웃 정확 계산
+# =========================
+
+from urllib.parse import urlparse, parse_qs
+from typing import List, Dict, Optional
+from datetime import datetime, timedelta, timezone
+
+KST = timezone(timedelta(hours=9))
+
+def _slack_escape(s: Optional[str]) -> str:
+    if s is None:
+        return ""
+    return str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+def _clean_text(s: Optional[str]) -> str:
+    return (s or "").strip()
+
+def _oy_goodsno_from_url(u: Optional[str]) -> str:
+    """URL에서 goodsNo만 뽑아 안정 키로 사용 (링크는 그대로 유지)"""
+    if not u:
+        return ""
+    try:
+        return parse_qs(urlparse(u).query).get("goodsNo", [""])[0]
+    except Exception:
+        return ""
+
+def _oy_key(it: Dict) -> str:
+    """키 생성: goodsNo 우선, 없으면 name 계열."""
+    u = (it.get("url") or "").strip()
+    g = _oy_goodsno_from_url(u)
+    if g:
+        return f"g:{g}"
     return (it.get("name") or it.get("raw_name") or "").strip()
 
-def _oy_link(name: str, url: str | None) -> str:
-    return f"<{url}|{name}>" if url else name
+def _link(name: str, url: Optional[str]) -> str:
+    n = _slack_escape(name)
+    return f"<{url}|{n}>" if url else n
 
-def build_slack_message_kor(today_items: list[dict], prev_items: list[dict], now_kst) -> str:
+def _fmt_price(v) -> str:
+    try:
+        return f"{int(v):,}원"
+    except Exception:
+        return str(v or "")
+
+def build_slack_message_kor(
+    date_str: str,
+    today_items: List[Dict],
+    prev_items: List[Dict],
+    total_count: int
+) -> str:
     """
-    규칙:
-      - TOP10: 전일 대비 배지 (↑n / ↓n / (-) / (new))
-      - 🔥 급상승 / 📉 급하락: Top100 전체, 변동 10계단 이상, 각 5개
-      - ❌ OUT: 전일 70위 이내였고 오늘 목록에 없는 항목, 최대 5개 (전일 순위 오름차순)
-      - 🆕 뉴랭커: Top30 신규 진입, 최대 3개
-    today_items/prev_items 스키마: {"rank","name","raw_name","url","sale_price","discount_pct",...}
+    올리브영(국내) 슬랙 메시지:
+    - TOP 10: 배지(↑/↓/(-)/(new))
+    - 급상승/급하락: |Δrank| >= 10, 각 5개
+    - 뉴랭커: 5개
+    - OUT: 5개 (전일 ≤100에서 이탈, 전일 URL로 링크)
+    - 랭크 인&아웃: Top100 교체 수(대칭차집합/2)
     """
-    # 전일 rank 맵(name-key → rank)
-    prev_rank_map: dict[str, int] = {}
+    # 전일 rank / url 맵 (key = _oy_key)
+    prev_rank_map: Dict[str, int] = {}
+    prev_url_map: Dict[str, str] = {}
     for p in (prev_items or []):
         k = _oy_key(p)
         if not k:
             continue
         try:
-            prev_rank_map[k] = int(p.get("rank") or 0)
+            r = int(p.get("rank") or 0)
         except Exception:
-            pass
+            r = 0
+        prev_rank_map[k] = r
+        if p.get("url"):
+            prev_url_map[k] = p["url"]
 
-    # 금일 url 맵(name-key → url)
-    today_url: dict[str, str] = {}
+    # 오늘 key, rank, url, name 맵
+    today_key_rank: Dict[str, int] = {}
+    today_key_url: Dict[str, str] = {}
+    today_key_name: Dict[str, str] = {}
     for t in (today_items or []):
         k = _oy_key(t)
-        if k and t.get("url"):
-            today_url[k] = t["url"]
-
-    # ---------- TOP10 (배지 포함) ----------
-    top10_lines: list[str] = []
-    for it in (today_items or [])[:10]:
-        cur = int(it.get("rank") or 0)
-        key = _oy_key(it)
-        prev = prev_rank_map.get(key)
-        if prev is None:
-            badge = "(new)"
-        elif prev > cur:
-            badge = f"(↑{prev - cur})"
-        elif prev < cur:
-            badge = f"(↓{cur - prev})"
-        else:
-            badge = "(-)"
-        price_txt = fmt_price_with_discount(it.get("sale_price"), it.get("discount_pct"))
-        top10_lines.append(f"{cur}. {badge} {_oy_link(it.get('name') or '', it.get('url'))} — {price_txt}")
-
-    # 전일 데이터 없으면 TOP10만
-    if not prev_rank_map:
-        lines = [f"*올리브영 데일리 전체 랭킹 100 (국내)* ({now_kst.strftime('%Y-%m-%d %H:%M KST')})",
-                 "", "*TOP 10*"] + (top10_lines or ["- 데이터 없음"])
-        return "\n".join(lines)
-
-    # ---------- Top100 전체 비교 ----------
-    today_keys = {_oy_key(x) for x in (today_items or []) if _oy_key(x)}
-    prev_keys  = set(prev_rank_map.keys())
-    common     = today_keys & prev_keys
-
-    # 급상승/급하락 (±10)
-    rising, falling = [], []
-    for it in (today_items or []):
-        k = _oy_key(it)
-        if k not in common:
+        if not k:
             continue
-        pr = int(prev_rank_map[k])
-        cr = int(it.get("rank") or 0)
-        diff = pr - cr
-        if diff >= 10:
-            rising.append((diff, cr, pr, k))
-        elif diff <= -10:
-            falling.append((-diff, cr, pr, k))  # 절댓값 보관
+        try:
+            r = int(t.get("rank") or 0)
+        except Exception:
+            r = 0
+        today_key_rank[k] = r
+        today_key_url[k]  = t.get("url") or ""
+        today_key_name[k] = t.get("name") or t.get("raw_name") or ""
 
-    rising.sort(key=lambda x: (-x[0], x[1], x[2], x[3]))   # 상승 폭↓, 현 순위↑, 전 순위↑, 이름
-    falling.sort(key=lambda x: (-x[0], x[1], x[2], x[3]))  # 하락 폭↓, 현 순위↑ …
+    # TOP 10 (배지)
+    top10_lines: List[str] = []
+    for t in (today_items or [])[:10]:
+        k   = _oy_key(t)
+        cur = int(t.get("rank") or 0)
+        nm  = _clean_text(t.get("name") or t.get("raw_name"))
+        url = t.get("url")
+        if k in prev_rank_map:
+            prev = int(prev_rank_map.get(k) or 0)
+            if prev > 0:
+                if cur < prev:
+                    badge = f"(↑{prev - cur})"
+                elif cur > prev:
+                    badge = f"(↓{cur - prev})"
+                else:
+                    badge = "(-)"
+            else:
+                badge = "(-)"
+        else:
+            badge = "(new)"
+        top10_lines.append(f"{cur}. {badge} {_link(nm, url)} — {_fmt_price(t.get('sale_price') or t.get('price'))}")
 
-    rising_lines  = [f"- {_oy_link(k, today_url.get(k))} {pr}위 → {cr}위 (↑{imp})"  for imp, cr, pr, k in rising[:5]]
-    falling_lines = [f"- {_oy_link(k, today_url.get(k))} {pr}위 → {cr}위 (↓{drop})" for drop, cr, pr, k in falling[:5]]
+    # 급상승 / 급하락 / 뉴랭커 / OUT 후보 계산
+    ups, downs, newcomers, outs = [], [], [], []
 
-    # 뉴랭커(Top30)
-    newcomers = []
-    for it in (today_items or []):
-        k = _oy_key(it)
-        if k and k not in prev_keys and int(it.get("rank") or 0) <= 30:
-            newcomers.append((int(it["rank"]), f"- {_oy_link(k, it.get('url'))} NEW → {int(it['rank'])}위"))
-    newcomers.sort(key=lambda x: x[0])
-    newcomer_lines = [ln for _, ln in newcomers[:3]]
+    for k, cur in today_key_rank.items():
+        prev = prev_rank_map.get(k)
+        nm   = today_key_name.get(k, "")
+        url  = today_key_url.get(k, "")
+        if prev is None:
+            # NEW (전일 Top100 밖 또는 미존재)
+            newcomers.append({"name": nm, "url": url, "rank": cur})
+        else:
+            # 양수면 상승(순위 숫자 감소), 음수면 하락(순위 숫자 증가)
+            delta = prev - cur
+            if delta >= 10:
+                ups.append({"name": nm, "url": url, "prev_rank": prev, "rank": cur, "change": delta})
+            elif delta <= -10:
+                downs.append({"name": nm, "url": url, "prev_rank": prev, "rank": cur, "change": delta})
 
-    # OUT(전일 ≤70, 오늘 미존재)
-    outs = []
-    for k, r in sorted(prev_rank_map.items(), key=lambda kv: kv[1]):
-        if r <= 70 and k not in today_keys:
-            outs.append((r, f"- {_oy_link(k, None)} {r}위 → OUT"))
-    out_lines = [ln for _, ln in outs[:5]]
+    # OUT: 전일 ≤100 이고 오늘 Top100에서 사라진 키
+    today_keys = set(today_key_rank.keys())
+    for k, pr in prev_rank_map.items():
+        if 1 <= pr <= 100 and k not in today_keys:
+            nm  = _clean_text( (prev_items and (_clean_text((next((p.get("name") or p.get("raw_name") or "") for p in prev_items if _oy_key(p)==k), "")))) or today_key_name.get(k) or "" )
+            url = prev_url_map.get(k, "")
+            outs.append({"name": nm, "url": url, "rank": pr})
 
-    inout_count = len(newcomer_lines) + len(out_lines)
+    # 정렬 및 상한
+    ups.sort(key=lambda x: (-int(x["change"]), int(x["rank"]), int(x["prev_rank"])))
+    downs.sort(key=lambda x: (abs(int(x["change"])) * -1, int(x["rank"]), int(x["prev_rank"])))
+    newcomers.sort(key=lambda x: int(x["rank"]))
+    outs.sort(key=lambda x: int(x["rank"]))
 
-    # 메시지 조합
-    lines = [
-        f"*올리브영 데일리 전체 랭킹 100 (국내)* ({now_kst.strftime('%Y-%m-%d %H:%M KST')})",
-        "",
-        "*TOP 10*",
-        *(top10_lines or ["- 데이터 없음"]),
-        "",
-        "*🔥 급상승*",
-        *(rising_lines or ["- 해당 없음"]),
-        "",
-        "*🆕 뉴랭커*",
-        *(newcomer_lines or ["- 해당 없음"]),
-        "",
-        "*📉 급하락*",
-        *(falling_lines or ["- 해당 없음"]),
-        *out_lines,
-        "",
-        "*↔ 랭크 인&아웃*",
-        f"{inout_count}개의 제품이 인&아웃 되었습니다.",
-    ]
+    ups_lines       = [f"- {_link(u['name'], u.get('url'))} {u['prev_rank']}위 → {u['rank']}위 (↑{u['change']})" for u in ups[:5]] or ["- (해당 없음)"]
+    newcomers_lines = [f"- {_link(n['name'], n.get('url'))} NEW → {n['rank']}위" for n in newcomers[:5]] or ["- (해당 없음)"]
+    downs_lines     = [f"- {_link(d['name'], d.get('url'))} {d['prev_rank']}위 → {d['rank']}위 (↓{abs(int(d['change']))})" for d in downs[:5]] or ["- (해당 없음)"]
+    outs_lines      = [f"- {_link(o['name'], o.get('url'))} {o['rank']}위 → OUT" for o in outs[:5]] or ["- (해당 없음)"]
+
+    # 인&아웃(교체 수) – Top100 대칭차집합/2 (goodsNo 기준)
+    today_top_keys = {_oy_key(x) for x in (today_items or [])[:100] if _oy_key(x)}
+    prev_top_keys  = {k for k, r in prev_rank_map.items() if r and r <= 100}
+    inout_count    = len(today_top_keys ^ prev_top_keys) // 2
+
+    # 메시지 조립
+    now_kst = datetime.now(KST).strftime("%Y-%m-%d %H:%M KST")
+    header  = f"*올리브영 국내 Top 100* ({now_kst})"
+    lines: List[str] = [header, "", "*TOP 10*"]
+    lines.extend(top10_lines or ["- 데이터 없음"])
+
+    lines.append("\n*🔥 급상승*")
+    lines.extend(ups_lines)
+
+    lines.append("\n*🆕 뉴랭커*")
+    lines.extend(newcomers_lines)
+
+    lines.append("\n*📉 급하락*")
+    lines.extend(downs_lines)
+
+    lines.append("\n*❌ OUT*")
+    lines.extend(outs_lines)
+
+    lines.append("\n*↔ 랭크 인&아웃*")
+    lines.append(f"{inout_count}개의 제품이 인&아웃 되었습니다.")
+
     return "\n".join(lines)
 
 
