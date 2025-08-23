@@ -687,9 +687,17 @@ def main():
                 except Exception as e:
                     logging.exception("CSV parse failed: %s", e)
 
-    # 5) (글로벌 규칙) 슬랙 메시지 생성 + 전송
-    text = build_slack_message_kor(items_filled, prev_items or [], now_kst)
-    send_slack_text(text)
+# 현재 시각(KST) → "YYYY-MM-DD HH:MM KST"
+now_kst = datetime.now(KST)
+date_str = now_kst.strftime("%Y-%m-%d %H:%M KST")
+
+# 슬랙 텍스트 생성
+text = build_slack_message_kor(
+    date_str=date_str,          # ← 표시용 날짜 문자열 (공백 포함)
+    today_items=items,          # 오늘 랭킹 100개
+    prev_items=prev_items or [],# 전일 랭킹
+    total_count=len(items),     # 총 수집 개수
+)
 
     logging.info("Done.")
     return 0
