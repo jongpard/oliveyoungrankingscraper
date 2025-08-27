@@ -372,7 +372,7 @@ def build_slack_message_kor(
         top10_lines.append(f"{cur}. {badge} {_link(nm, url)} — {fmt_price_with_discount(t.get('sale_price'), t.get('discount_pct'))}")
 
     if not prev_rank_map:
-        header=f"*올리브영 국내 Top 100* ({date_str})"
+        header=f"*올리브영 데일리 전체 랭킹 100 (국내)* ({date_str})"
         return "\n".join([header,"","*TOP 10*",*(top10_lines or ["- 데이터 없음"])])
 
     today_keys=set(today_key_rank.keys())
