@@ -6,3 +6,4 @@ oauth2client
 google-api-python-client
 beautifulsoup4
 pytz
+packaging>=23.2
