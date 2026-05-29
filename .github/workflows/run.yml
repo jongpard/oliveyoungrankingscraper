@@ -2,7 +2,7 @@ name: OY GDrive Runner
 
 on:
   schedule:
-    - cron: "17 5 * * *" # 매일 KST 14:01 (UTC 05:01)
+    - cron: "17 3 * * *" # 매일 KST 14:01 (UTC 05:01)
   workflow_dispatch:
 
 jobs:
