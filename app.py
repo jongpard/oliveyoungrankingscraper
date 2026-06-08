@@ -219,70 +219,26 @@ def try_http_candidates():
 
 def try_playwright_render(url="https://www.oliveyoung.co.kr/store/main/getBestList.do"):
     if not PLAYWRIGHT_AVAILABLE:
-        logging.error("Playwright not available")
         return None, None
-
     try:
         with sync_playwright() as p:
-            browser = p.chromium.launch(
-                headless=True,
-                args=[
-                    "--no-sandbox",
-                    "--disable-dev-shm-usage",
-                    "--disable-blink-features=AutomationControlled"
-                ]
-            )
-
+            browser = p.chromium.launch(headless=True, args=["--no-sandbox","--disable-dev-shm-usage"])
             ctx = browser.new_context(
-                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36",
-                locale="ko-KR",
-                viewport={"width": 1920, "height": 1080}
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36",
+                locale="ko-KR"
             )
-
             page = ctx.new_page()
-
-            page.add_init_script("""
-                Object.defineProperty(navigator, 'webdriver', {
-                    get: () => undefined
-                });
-            """)
-
-            logging.info("Playwright goto start")
-
-            page.goto(
-                url,
-                wait_until="domcontentloaded",
-                timeout=60000
-            )
-
-            page.wait_for_timeout(5000)
-
-            title = page.title()
+            try:
+                page.goto("https://www.oliveyoung.co.kr/store/main/getBest.do",
+                          wait_until="domcontentloaded", timeout=60000)
+            except Exception:
+                pass
+            page.goto(url, wait_until="networkidle", timeout=60000)
+            page.wait_for_timeout(2500)
             html = page.content()
-
-            logging.info("Page title: %s", title)
-            logging.info("HTML length: %s", len(html))
-
-            with open("debug.html", "w", encoding="utf-8") as f:
-                f.write(html)
-
-            page.screenshot(
-                path="debug.png",
-                full_page=True
-            )
-
             items = parse_html_products(html)
-
-            logging.info("Parsed products: %s", len(items))
-
             browser.close()
-
-            if items:
-                return items, html[:800]
-
-            logging.error("No products found in HTML")
-            return None, html[:800]
-
+            return items, html[:800]
     except Exception as e:
         logging.exception("Playwright render error: %s", e)
         return None, None
@@ -473,6 +429,7 @@ def build_slack_message_kor(
     inout_count=len(today_top_keys ^ prev_top_keys)//2
 
     # 메시지
+    header=f"*올리브영 국내 Top 100* ({date_str})"
     header=f"*올리브영 데일리 전체 랭킹 Top 100* ({date_str})"
     lines=[
         header,"",
