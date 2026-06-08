@@ -233,8 +233,8 @@ def try_playwright_render(url="https://www.oliveyoung.co.kr/store/main/getBestLi
                           wait_until="domcontentloaded", timeout=60000)
             except Exception:
                 pass
-            page.goto(url, wait_until="networkidle", timeout=60000)
-            page.wait_for_timeout(2500)
+            page.goto(url, wait_until="domcontentloaded", timeout=60000)
+            page.wait_for_timeout(5000)
             html = page.content()
             items = parse_html_products(html)
             browser.close()
