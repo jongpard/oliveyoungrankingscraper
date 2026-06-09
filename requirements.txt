@@ -1,3 +1,4 @@
+scrapling[fetchers]
 playwright
 requests
 pandas
@@ -7,4 +8,3 @@ google-api-python-client
 beautifulsoup4
 pytz
 packaging>=23.2
-scrapling>=0.1.0
