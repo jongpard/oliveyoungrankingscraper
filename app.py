@@ -16,12 +16,12 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from bs4 import BeautifulSoup
 
-# (선택) Playwright 폴백
+# [수정 반영] 안티봇 우회 엔진 Scrapling 도입
 try:
-    from playwright.sync_api import sync_playwright
-    PLAYWRIGHT_AVAILABLE = True
+    from scrapling import Fetcher
+    SCRAPLING_AVAILABLE = True
 except Exception:
-    PLAYWRIGHT_AVAILABLE = False
+    SCRAPLING_AVAILABLE = False
 
 # Google Drive (OAuth 사용자 계정)
 from googleapiclient.discovery import build
@@ -217,30 +217,25 @@ def try_http_candidates():
             logging.exception("HTTP candidate error: %s %s", url, e)
     return None, None
 
-def try_playwright_render(url="https://www.oliveyoung.co.kr/store/main/getBestList.do"):
-    if not PLAYWRIGHT_AVAILABLE:
+# [신규 추가] 클라우드플레어 우회용 Scrapling 전용 함수
+def try_scrapling_render(url="https://www.oliveyoung.co.kr/store/main/getBestList.do"):
+    if not SCRAPLING_AVAILABLE:
+        logging.warning("Scrapling 라이브러리가 로드되지 않아 우회 모드를 건너뜁니다.")
         return None, None
     try:
-        with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True, args=["--no-sandbox","--disable-dev-shm-usage"])
-            ctx = browser.new_context(
-                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36",
-                locale="ko-KR"
-            )
-            page = ctx.new_page()
-            try:
-                page.goto("https://www.oliveyoung.co.kr/store/main/getBest.do",
-                          wait_until="domcontentloaded", timeout=60000)
-            except Exception:
-                pass
-            page.goto(url, wait_until="networkidle", timeout=60000)
-            page.wait_for_timeout(2500)
-            html = page.content()
-            items = parse_html_products(html)
-            browser.close()
-            return items, html[:800]
+        logging.info("Scrapling Stealth Fetcher 실행 중: %s", url)
+        # Turnstile 챌린지 및 브라우저 지문 자동 매칭 활성화
+        fetcher = Fetcher(headless=True, auto_match=True)
+        response = fetcher.get(url, adaptive=True)
+        html = response.text
+        
+        if not html:
+            return None, None
+            
+        items = parse_html_products(html)
+        return items, html[:800]
     except Exception as e:
-        logging.exception("Playwright render error: %s", e)
+        logging.exception("Scrapling 우회 실패: %s", e)
         return None, None
 
 def fill_ranks_and_fix(items: List[Dict]) -> List[Dict]:
@@ -324,13 +319,6 @@ def build_slack_message_kor(
     prev_items: List[Dict],
     total_count: int
 ) -> str:
-    """
-    - TOP10: 배지(↑/↓/(-)/(new))
-    - 🔥 급상승: |Δrank| >= 10, 최대 5개
-    - 🆕 뉴랭커: 최대 5개
-    - 📉 급하락: '하락 최대 5개' + 'OUT 최대 5개'를 한 섹션 안에 표시
-    - ↔ 인&아웃: Top100 교체 수 (대칭차집합/2, goodsNo 키 기준)
-    """
     # 전일 맵
     prev_rank_map: Dict[str, int] = {}
     prev_url_map:  Dict[str, str] = {}
@@ -398,7 +386,6 @@ def build_slack_message_kor(
     newcomer_lines=[ln for _,ln in newcomers[:5]] or ["- 해당 없음"]
 
     # 📉 급하락 (하락 + OUT 각각 5개)
-    # OUT
     out_cands=[]
     for k, pr in prev_rank_map.items():
         pr=int(pr)
@@ -411,7 +398,6 @@ def build_slack_message_kor(
     out_cands.sort(key=lambda x:x["prev"])
     out_lines=[f"- {_link(o['name'], o['url'])} {o['prev']}위 → OUT" for o in out_cands[:5]] or ["- OUT 해당 없음"]
 
-    # 하락
     drop_cands=[]
     for k in common:
         pr=int(prev_rank_map[k]); cr=int(today_key_rank[k])
@@ -429,7 +415,6 @@ def build_slack_message_kor(
     inout_count=len(today_top_keys ^ prev_top_keys)//2
 
     # 메시지
-    header=f"*올리브영 국내 Top 100* ({date_str})"
     header=f"*올리브영 데일리 전체 랭킹 Top 100* ({date_str})"
     lines=[
         header,"",
@@ -452,17 +437,21 @@ def main() -> int:
     today=now.date(); yday=(now - timedelta(days=1)).date()
     logging.info("Build: OY KR %s", today.isoformat())
 
-    # 수집
+    # 1단계: 기본 HTTP API 호출 시도
     items,_ = try_http_candidates()
+    
+    # [수정 반영] 2단계: 봇에 막힐 시 클라우드플레어 전용 우회 엔진(Scrapling) 작동
     if not items:
-        logging.info("HTTP 실패 → Playwright 폴백")
-        items,_ = try_playwright_render()
+        logging.info("일반 HTTP 실패 → Scrapling 안티봇 우회 모드로 전환")
+        items,_ = try_scrapling_render()
+        
     if not items:
-        send_slack_text("❌ 올리브영 국내 수집 실패")
+        send_slack_text("❌ 올리브영 국내 수집 실패 (모든 폴백 수단 차단됨)")
         return 1
+        
     items = fill_ranks_and_fix(items[:MAX_ITEMS])
 
-    # CSV
+    # CSV 생성 및 로컬 저장
     os.makedirs(OUT_DIR, exist_ok=True)
     fname_today=f"올리브영_랭킹_{today.isoformat()}.csv"
     header=["rank","brand","name","original_price","sale_price","discount_pct","url","raw_name"]
@@ -520,7 +509,7 @@ def main() -> int:
                     except Exception:
                         continue
 
-    # Slack
+    # Slack 전송
     text = build_slack_message_kor(
         date_str=now.strftime("%Y-%m-%d %H:%M KST"),
         today_items=items,
