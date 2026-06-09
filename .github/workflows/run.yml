@@ -16,6 +16,8 @@ jobs:
       GOOGLE_CLIENT_ID:  ${{ secrets.GOOGLE_CLIENT_ID }}
       GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
       GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+      # 👇 이 줄을 추가하여 등록해 두신 스크래퍼 API 키를 주입합니다.
+      SCRAPER_API_KEY:      ${{ secrets.SCRAPER_API_KEY }}
 
     steps:
       - name: Checkout
@@ -29,33 +31,15 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip setuptools wheel
-          # [수정] 아래 설치 목록에 scrapling[fetchers] 를 명시적으로 주입했습니다.
           pip install requests beautifulsoup4 urllib3 playwright packaging scrapling[fetchers] \
                       google-api-python-client google-auth google-auth-httplib2 google-auth-oauthlib
-          
-          # [수정] Scrapling 전용 안티봇 브라우저 코어를 빌드 및 다운로드합니다.
           scrapling install
           python -m playwright install --with-deps chromium
-
-      - name: Debug env presence
-        run: |
-          python - << 'PY'
-          import os
-          keys = [
-              "GDRIVE_FOLDER_ID",
-              "GOOGLE_CLIENT_ID",
-              "GOOGLE_CLIENT_SECRET",
-              "GOOGLE_REFRESH_TOKEN",
-              "SLACK_WEBHOOK_URL"
-          ]
-          for k in keys:
-              v = os.getenv(k)
-              print(k, "=", "SET" if v else "MISSING", "| length =", (len(v) if v else 0))
-          PY
 
       - name: Run scraper
         run: python app.py
 
+      # 실패 시 디버깅용 (성공하면 작동 안 함)
       - name: Upload artifacts on failure
         if: failure()
         uses: actions/upload-artifact@v4
