@@ -16,9 +16,9 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from bs4 import BeautifulSoup
 
-# [수정 반영] 안티봇 우회 엔진 Scrapling 도입
+# [수정 반영] 안티봇 우회 엔진 Scrapling의 StealthyFetcher 도입
 try:
-    from scrapling import Fetcher
+    from scrapling import StealthyFetcher
     SCRAPLING_AVAILABLE = True
 except Exception:
     SCRAPLING_AVAILABLE = False
@@ -217,17 +217,16 @@ def try_http_candidates():
             logging.exception("HTTP candidate error: %s %s", url, e)
     return None, None
 
-# [신규 추가] 클라우드플레어 우회용 Scrapling 전용 함수
+# [신규 추가] 클라우드플레어 정면 우회용 Scrapling 정밀 구현
 def try_scrapling_render(url="https://www.oliveyoung.co.kr/store/main/getBestList.do"):
     if not SCRAPLING_AVAILABLE:
         logging.warning("Scrapling 라이브러리가 로드되지 않아 우회 모드를 건너뜁니다.")
         return None, None
     try:
-        logging.info("Scrapling Stealth Fetcher 실행 중: %s", url)
-        # Turnstile 챌린지 및 브라우저 지문 자동 매칭 활성화
-        fetcher = Fetcher(headless=True, auto_match=True)
-        response = fetcher.get(url, adaptive=True)
-        html = response.text
+        logging.info("Scrapling StealthyFetcher 구동 시작: %s", url)
+        # solve_cloudflare=True 옵션으로 클라우드플레어 Turnstile 보안 챌린지 자동 해결 프로세스 기동
+        page = StealthyFetcher.fetch(url, solve_cloudflare=True, timeout=60000)
+        html = page.text
         
         if not html:
             return None, None
@@ -235,7 +234,7 @@ def try_scrapling_render(url="https://www.oliveyoung.co.kr/store/main/getBestLis
         items = parse_html_products(html)
         return items, html[:800]
     except Exception as e:
-        logging.exception("Scrapling 우회 실패: %s", e)
+        logging.exception("Scrapling 안티봇 관통 실패: %s", e)
         return None, None
 
 def fill_ranks_and_fix(items: List[Dict]) -> List[Dict]:
@@ -440,7 +439,7 @@ def main() -> int:
     # 1단계: 기본 HTTP API 호출 시도
     items,_ = try_http_candidates()
     
-    # [수정 반영] 2단계: 봇에 막힐 시 클라우드플레어 전용 우회 엔진(Scrapling) 작동
+    # 2단계: 봇에 막힐 시 클라우드플레어 전용 우회 엔진(Scrapling) 작동
     if not items:
         logging.info("일반 HTTP 실패 → Scrapling 안티봇 우회 모드로 전환")
         items,_ = try_scrapling_render()
