@@ -10,7 +10,6 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
-    # ✅ GitHub Secrets → ENV 매핑 (OAuth 전용)
     env:
       SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
       GDRIVE_FOLDER_ID:  ${{ secrets.GDRIVE_FOLDER_ID }}
@@ -30,13 +29,14 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip setuptools wheel
-          pip install requests beautifulsoup4 urllib3 playwright packaging \
+          # [수정] 아래 설치 목록에 scrapling[fetchers] 를 명시적으로 주입했습니다.
+          pip install requests beautifulsoup4 urllib3 playwright packaging scrapling[fetchers] \
                       google-api-python-client google-auth google-auth-httplib2 google-auth-oauthlib
-          # Playwright + Chromium 설치 (OS 의존성 포함)
+          
+          # [수정] Scrapling 전용 안티봇 브라우저 코어를 빌드 및 다운로드합니다.
+          scrapling install
           python -m playwright install --with-deps chromium
-          pip freeze | grep -E 'packaging|google-api|google-auth|playwright' || true
 
-      # 🔎 시크릿 주입 확인 (반드시 app 실행 전)
       - name: Debug env presence
         run: |
           python - << 'PY'
@@ -65,4 +65,3 @@ jobs:
             rankings/**
             artifacts/**
           if-no-files-found: ignore
-
