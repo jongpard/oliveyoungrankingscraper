@@ -16,12 +16,16 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from bs4 import BeautifulSoup
 
-# [수정 반영] 안티봇 우회 엔진 Scrapling의 StealthyFetcher 도입
+# [교정 반영] 패키지 버전에 구애받지 않도록 이중 임포트 안전 기믹 적용
 try:
-    from scrapling import StealthyFetcher
+    from scrapling.fetchers import StealthyFetcher
     SCRAPLING_AVAILABLE = True
-except Exception:
-    SCRAPLING_AVAILABLE = False
+except ImportError:
+    try:
+        from scrapling.default import StealthyFetcher
+        SCRAPLING_AVAILABLE = True
+    except ImportError:
+        SCRAPLING_AVAILABLE = False
 
 # Google Drive (OAuth 사용자 계정)
 from googleapiclient.discovery import build
@@ -217,14 +221,14 @@ def try_http_candidates():
             logging.exception("HTTP candidate error: %s %s", url, e)
     return None, None
 
-# [수정 완료] 기본 URL에 올리브영 실시간 랭킹 전체(Top 100) 파라미터를 명시적으로 주입
-def try_scrapling_render(url="https://www.oliveyoung.co.kr/store/main/getBestList.do?dispCatNo=90000010001&rowsPerPage=100&pageIdx=0"):
+# [교정 완료] 불필요한 백엔드 인자 제거, 브라우저가 직접 호출하는 순수 전체 랭킹 주소로 원복
+def try_scrapling_render(url="https://www.oliveyoung.co.kr/store/main/getBestList.do"):
     if not SCRAPLING_AVAILABLE:
         logging.warning("Scrapling 라이브러리가 로드되지 않아 우회 모드를 건너뜁니다.")
         return None, None
     try:
         logging.info("Scrapling StealthyFetcher 구동 시작: %s", url)
-        # solve_cloudflare=True 옵션으로 클라우드플레어 Turnstile 보안 챌린지 우회 작동
+        # solve_cloudflare=True 옵션과 함께 정석 주소로 챌린지 돌파 시도
         page = StealthyFetcher.fetch(url, solve_cloudflare=True, timeout=60000)
         html = page.text
         
