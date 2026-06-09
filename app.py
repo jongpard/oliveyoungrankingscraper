@@ -217,14 +217,14 @@ def try_http_candidates():
             logging.exception("HTTP candidate error: %s %s", url, e)
     return None, None
 
-# [신규 추가] 클라우드플레어 정면 우회용 Scrapling 정밀 구현
-def try_scrapling_render(url="https://www.oliveyoung.co.kr/store/main/getBestList.do"):
+# [수정 완료] 기본 URL에 올리브영 실시간 랭킹 전체(Top 100) 파라미터를 명시적으로 주입
+def try_scrapling_render(url="https://www.oliveyoung.co.kr/store/main/getBestList.do?dispCatNo=90000010001&rowsPerPage=100&pageIdx=0"):
     if not SCRAPLING_AVAILABLE:
         logging.warning("Scrapling 라이브러리가 로드되지 않아 우회 모드를 건너뜁니다.")
         return None, None
     try:
         logging.info("Scrapling StealthyFetcher 구동 시작: %s", url)
-        # solve_cloudflare=True 옵션으로 클라우드플레어 Turnstile 보안 챌린지 자동 해결 프로세스 기동
+        # solve_cloudflare=True 옵션으로 클라우드플레어 Turnstile 보안 챌린지 우회 작동
         page = StealthyFetcher.fetch(url, solve_cloudflare=True, timeout=60000)
         html = page.text
         
