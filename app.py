@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# OliveYoung(국내) 랭킹 수집 + GDrive 업로드 + Slack 알림 (클라우드플래어 완벽 우회 교정판)
+# OliveYoung(국내) 랭킹 수집 + GDrive 업로드 + Slack 알림 (ScrapingBee 프리미엄 패치 버전)
 
 import os
 import re
@@ -9,7 +9,7 @@ import logging
 from io import BytesIO, StringIO
 from typing import List, Dict, Optional
 from datetime import datetime, timedelta, timezone
-from urllib.parse import urlparse, parse_qs, quote_plus
+from urllib.parse import urlparse, parse_qs
 
 import requests
 from requests.adapters import HTTPAdapter
@@ -40,8 +40,8 @@ GOOGLE_CLIENT_ID = os.environ.get("GOOGLE_CLIENT_ID", "").strip()
 GOOGLE_CLIENT_SECRET = os.environ.get("GOOGLE_CLIENT_SECRET", "").strip()
 GOOGLE_REFRESH_TOKEN = os.environ.get("GOOGLE_REFRESH_TOKEN", "").strip()
 
-# GitHub Actions 환경변수 SCRAPER_API_KEY에 입력된 ScrapingAnt 키를 바인딩
-SCRAPINGANT_API_KEY = os.environ.get("SCRAPER_API_KEY", "").strip()
+# GitHub Actions 환경변수 SCRAPER_API_KEY에 입력된 ScrapingBee 키를 바인딩
+SCRAPINGBEE_API_KEY = os.environ.get("SCRAPER_API_KEY", "").strip()
 
 OUT_DIR = "rankings"
 MAX_ITEMS = 100
@@ -180,51 +180,50 @@ def try_http_candidates():
             logging.exception("HTTP candidate error: %s", e)
     return None, None
 
-def try_scrapingant_fetch(url="https://www.oliveyoung.co.kr/store/main/getBestList.do"):
-    if not SCRAPINGANT_API_KEY:
-        logging.warning("SCRAPER_API_KEY(ScrapingAnt) 환경변수가 없어 스크래퍼 모드를 건너뜁니다.")
+# [★수정 핵심★] ScrapingBee 클라우드플래어 전용 우회 파라미터 빌드 모듈
+def try_scrapingbee_fetch(url="https://www.oliveyoung.co.kr/store/main/getBestList.do"):
+    if not SCRAPINGBEE_API_KEY:
+        logging.warning("SCRAPER_API_KEY(ScrapingBee) 환경변수가 없어 스크래퍼 모드를 건너뜁니다.")
         return None, None
     try:
-        logging.info("ScrapingAnt 경유 수집 시작...")
-        encoded_target_url = quote_plus(url)
-        full_api_url = f"https://api.scrapingant.com/v2/general?url={encoded_target_url}&browser=true"
+        logging.info("ScrapingBee 경유 우회 수집 시작...")
         
-        headers = {
-            "x-api-key": SCRAPINGANT_API_KEY
+        # ScrapingBee 전용 우회 파라미터 셋업
+        # premium_proxy=true 옵션을 무료 크레딧 범위 내에서 강제 활성화하여 클라우드플래어를 저격합니다.
+        params = {
+            'api_key': SCRAPINGBEE_API_KEY,
+            'url': url,
+            'premium_proxy': 'true',
+            'render_js': 'true'
         }
         
-        r = requests.get(full_api_url, headers=headers, timeout=60)
-        logging.info("ScrapingAnt 응답 상태 코드: %s", r.status_code)
+        # Requests 기본 내장 인코더를 활용해 앤드포인트 호출 (타임아웃 60초)
+        r = requests.get('https://app.scrapingbee.com/api/v1', params=params, timeout=60)
+        logging.info("ScrapingBee 응답 상태 코드: %s", r.status_code)
         
-        # 만약 응답 바디 내용에 봇 차단 문구가 포함되어 있다면 실패로 명시적 처리
-        if r.status_code == 200 and "Ant-Bot-Detected" not in r.text:
+        if r.status_code == 200:
             items = parse_html_products(r.text)
             if items:
-                logging.info("ScrapingAnt를 통해 %d개의 상품 수집 성공!", len(items))
+                logging.info("ScrapingBee를 통해 %d개의 상품 수집 성공!", len(items))
                 return items, r.text[:800]
-        logging.warning("ScrapingAnt가 클라우드플래어 보안벽 또는 안티봇 탐지에 막혔습니다.")
+            else:
+                logging.warning("ScrapingBee 호출은 정상이나 데이터 파싱에 실패함.")
     except Exception as e:
-        logging.exception("ScrapingAnt 요청 중 실패 발생: %s", e)
+        logging.exception("ScrapingBee 요청 중 예외 에러 발생: %s", e)
     return None, None
 
 def try_scrapling_render(url="https://www.oliveyoung.co.kr/store/main/getBestList.do"):
-    if not SCRAPLING_AVAILABLE: 
-        logging.warning("Scrapling 라이브러리가 로드되지 않아 건너뜁니다.")
-        return None, None
+    if not SCRAPLING_AVAILABLE: return None, None
     try:
-        logging.info("Scrapling 안티봇 웹 드라이버 엔진 구동: %s", url)
-        # Playwright 기반으로 타겟 사이트의 클라우드플래어 챌린지를 깨부수고 바디를 가져옵니다.
+        logging.info("Scrapling 폴백 백업 엔진 구동: %s", url)
         page = StealthyFetcher.fetch(url, solve_cloudflare=True, timeout=60000)
         html = page.text
         if not html: return None, None
-        
         items = parse_html_products(html)
-        if items:
-            logging.info("Scrapling 브라우저 엔진을 통해 %d개의 상품 수집 성공!", len(items))
-            return items, html[:800]
+        return items, html[:800]
     except Exception as e:
-        logging.exception("Scrapling 엔진 구동 실패: %s", e)
-    return None, None
+        logging.exception("Scrapling 실패: %s", e)
+        return None, None
 
 def fill_ranks_and_fix(items: List[Dict]) -> List[Dict]:
     out=[]; r=1
@@ -341,7 +340,7 @@ def build_slack_message_kor(date_str: str, today_items: List[Dict], prev_items: 
         if 1<=int(pr)<=100 and k not in today_keys:
             out_cands.append({"k":k, "prev":int(pr), "name": today_key_name.get(k) or prev_name_map.get(k,""), "url": prev_url_map.get(k,"")})
     out_cands.sort(key=lambda x:x["prev"])
-    out_lines=[f"- {_link(o['name'], o['url'])} {o['prev']}位 → OUT" for o in out_cands[:5]] or ["- OUT 해당 없음"]
+    out_lines=[f"- {_link(o['name'], o['url'])} {o['prev']}위 → OUT" for o in out_cands[:5]] or ["- OUT 해당 없음"]
 
     drop_cands=[]
     for k in common:
@@ -364,18 +363,18 @@ def main() -> int:
     # 1단계: 생짜 HTTP 패킷 전송 시도
     items, _ = try_http_candidates()
     
-    # 2단계: [순서 교정] 생짜 HTTP 실패 시, 실제 웹 브라우저를 띄워 클라우드플래어를 우회하는 Scrapling을 1순위로 가동
+    # 2단계: 실패 시 우회 솔루션 1순위 [ScrapingBee API] 엔진 구동
     if not items:
-        logging.info("기본 HTTP 실패 → 1순위 우회전략: Scrapling 안티봇 브라우저 가동")
+        logging.info("기본 HTTP 실패 → 1순위 우회전략: ScrapingBee 프리미엄 우회 작동")
+        items, _ = try_scrapingbee_fetch()
+        
+    # 3단계: ScrapingBee가 토큰 만료 등으로 막힐 때를 대비한 2순위 안티봇 브라우저 솔루션 (Scrapling 모드)
+    if not items:
+        logging.info("ScrapingBee 수집 불가 → 2순위 백업 전략: Scrapling 안티봇 엔진 가동")
         items, _ = try_scrapling_render()
         
-    # 3단계: 만약 가상 컴 환경 문제 등으로 Scrapling 마저 실패할 경우 ScrapingAnt API를 최종 백업으로 작동
     if not items:
-        logging.info("Scrapling 엔진 수집 불가 → 2순위 백업 전략: ScrapingAnt API 라우팅 작동")
-        items, _ = try_scrapingant_fetch()
-        
-    if not items:
-        send_slack_text("❌ 올리브영 국내 데이터 수집 실패 (모든 우회 우회 프록시 엔진 차단됨)")
+        send_slack_text("❌ 올리브영 국내 데이터 수집 실패 (모든 우회 프록시 엔진 차단됨)")
         return 1
         
     items = fill_ranks_and_fix(items[:MAX_ITEMS])
