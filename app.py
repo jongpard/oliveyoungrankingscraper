@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# OliveYoung(국내) 랭킹 수집 + GDrive 업로드 + Slack 알림
+# OliveYoung(국내) 랭킹 수집 + GDrive 업로드 + Slack 알림 (ScrapingAnt 적용 버전)
 
 import os
 import re
@@ -40,8 +40,8 @@ GOOGLE_CLIENT_ID = os.environ.get("GOOGLE_CLIENT_ID", "").strip()
 GOOGLE_CLIENT_SECRET = os.environ.get("GOOGLE_CLIENT_SECRET", "").strip()
 GOOGLE_REFRESH_TOKEN = os.environ.get("GOOGLE_REFRESH_TOKEN", "").strip()
 
-# [추가] 깃허브 액션 비밀변수로부터 스크래퍼 API 키 로드
-SCRAPER_API_KEY = os.environ.get("SCRAPER_API_KEY", "").strip()
+# [변경] 기존 SCRAPER_API_KEY 대신 GitHub Actions의 시크릿 값을 그대로 로드 (동일 변수명 유지)
+SCRAPINGANT_API_KEY = os.environ.get("SCRAPER_API_KEY", "").strip()
 
 OUT_DIR = "rankings"
 MAX_ITEMS = 100
@@ -179,28 +179,28 @@ def try_http_candidates():
             logging.exception("HTTP candidate error: %s", e)
     return None, None
 
-# [신규 추가] 100% 치트키: Scraper API 연동 모듈
-def try_scraper_api_fetch(url="https://www.oliveyoung.co.kr/store/main/getBestList.do"):
-    if not SCRAPER_API_KEY:
-        logging.warning("SCRAPER_API_KEY 환경변수가 없어 스크래퍼 API 모드를 건너뜁니다.")
+# [변경] ScrapingAnt API 호출 연동 모듈
+def try_scrapingant_fetch(url="https://www.oliveyoung.co.kr/store/main/getBestList.do"):
+    if not SCRAPINGANT_API_KEY:
+        logging.warning("SCRAPER_API_KEY(ScrapingAnt) 환경변수가 없어 스크래퍼 모드를 건너뜁니다.")
         return None, None
     try:
-        logging.info("Scraper API 경유 수집 시작...")
-        # 한국 타깃 사이트이므로 한국 주거용/통신사 IP 프록시 라우팅 옵션 포함
+        logging.info("ScrapingAnt 경유 수집 시작...")
+        # ScrapingAnt v2 API 스펙에 맞춰 파라미터 재구성 (브라우저 렌더링 옵션 활성화)
         params = {
-            "api_key": SCRAPER_API_KEY,
+            "api_key": SCRAPINGANT_API_KEY,
             "url": url,
-            "country_code": "kr"
+            "browser": "true"
         }
-        r = requests.get("http://api.scraperapi.com", params=params, timeout=45)
-        logging.info("Scraper API 응답 상태 코드: %s", r.status_code)
+        r = requests.get("https://api.scrapingant.com/v2/general", params=params, timeout=60)
+        logging.info("ScrapingAnt 응답 상태 코드: %s", r.status_code)
         if r.status_code == 200:
             items = parse_html_products(r.text)
             if items:
-                logging.info("Scraper API를 통해 %d개의 상품 수집 성공!", len(items))
+                logging.info("ScrapingAnt를 통해 %d개의 상품 수집 성공!", len(items))
                 return items, r.text[:800]
     except Exception as e:
-        logging.exception("Scraper API 요청 실패: %s", e)
+        logging.exception("ScrapingAnt 요청 실패: %s", e)
     return None, None
 
 def try_scrapling_render(url="https://www.oliveyoung.co.kr/store/main/getBestList.do"):
@@ -223,7 +223,7 @@ def fill_ranks_and_fix(items: List[Dict]) -> List[Dict]:
         if r>MAX_ITEMS: break
     return out
 
-# ---------------- Google Drive & Slack (기존과 완전히 동일)
+# ---------------- Google Drive & Slack
 def build_drive_service_oauth():
     if not (GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET and GOOGLE_REFRESH_TOKEN): return None
     try:
@@ -353,18 +353,18 @@ def main() -> int:
     # 1단계: 기본 HTTP API 호출 시도
     items,_ = try_http_candidates()
     
-    # 2단계: 실패 시 [Scraper API]를 1순위 우회 솔루션으로 작동 (치트키)
+    # 2단계: 실패 시 [ScrapingAnt API]를 1순위 우회 솔루션으로 작동
     if not items:
-        logging.info("기본 HTTP 실패 → 1순위 우회책: Scraper API 가동")
-        items,_ = try_scraper_api_fetch()
+        logging.info("기본 HTTP 실패 → 1순위 우회책: ScrapingAnt API 가동")
+        items,_ = try_scrapingant_fetch()
         
-    # 3단계: Scraper API도 실패할 경우를 대비한 최후의 보루 (Scrapling 모드)
+    # 3단계: ScrapingAnt도 실패할 경우를 대비한 최후의 보루 (Scrapling 모드)
     if not items:
-        logging.info("Scraper API 실패 → 2순위 우회책: Scrapling 안티봇 모드 가동")
+        logging.info("ScrapingAnt 실패 → 2순위 우회책: Scrapling 안티봇 모드 가동")
         items,_ = try_scrapling_render()
         
     if not items:
-        send_slack_text("❌ 올리브영 국내 수집 실패 (스크래퍼 API 및 모든 우회 수단 차단)")
+        send_slack_text("❌ 올리브영 국내 수집 실패 (스크래핑앤트 및 모든 우회 수단 차단)")
         return 1
         
     items = fill_ranks_and_fix(items[:MAX_ITEMS])
