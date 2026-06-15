@@ -363,15 +363,15 @@ def main() -> int:
     # 1단계: 생짜 HTTP 패킷 전송 시도
     items, _ = try_http_candidates()
     
-    # 2단계: 실패 시 우회 솔루션 1순위 [ScrapingAnt API] 교정 기동
+    # 2단계: [순서 변경] 생짜 실패 시, 강력한 브라우저 엔진인 Scrapling 안티봇 모드를 먼저 가동
     if not items:
-        logging.info("기본 HTTP 실패 → 1순위 우회전략: ScrapingAnt API 라우팅 작동")
-        items, _ = try_scrapingant_fetch()
-        
-    # 3단계: ScrapingAnt마저 우회 불가할 시 백업용 2순위 안티봇 솔루션 (Scrapling 모드)
-    if not items:
-        logging.info("ScrapingAnt 수집 불가 → 2순위 백업 전략: Scrapling 안티봇 엔진 가동")
+        logging.info("기본 HTTP 실패 → 1순위 우회전략: Scrapling 안티봇 엔진 가동")
         items, _ = try_scrapling_render()
+        
+    # 3단계: Scrapling 마저 실패하거나 막힐 때 ScrapingAnt API를 차선책으로 가동
+    if not items:
+        logging.info("Scrapling 수집 불가 → 2순위 백업 전략: ScrapingAnt API 라우팅 작동")
+        items, _ = try_scrapingant_fetch()
         
     if not items:
         send_slack_text("❌ 올리브영 국내 데이터 수집 실패 (모든 우회 프록시 엔진 차단됨)")
