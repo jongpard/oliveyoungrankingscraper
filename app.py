@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# OliveYoung(국내) 랭킹 수집 + GDrive 업로드 + Slack 알림
+# OliveYoung(국내) 랭킹 수집 + GDrive 업로드 + Slack 알림 (ScraperAPI 패치 버전)
 
 import os
 import re
@@ -40,7 +40,7 @@ GOOGLE_CLIENT_ID = os.environ.get("GOOGLE_CLIENT_ID", "").strip()
 GOOGLE_CLIENT_SECRET = os.environ.get("GOOGLE_CLIENT_SECRET", "").strip()
 GOOGLE_REFRESH_TOKEN = os.environ.get("GOOGLE_REFRESH_TOKEN", "").strip()
 
-# [추가] 깃허브 액션 비밀변수로부터 스크래퍼 API 키 로드
+# GitHub Actions 환경변수 SCRAPER_API_KEY 바인딩
 SCRAPER_API_KEY = os.environ.get("SCRAPER_API_KEY", "").strip()
 
 OUT_DIR = "rankings"
@@ -49,7 +49,7 @@ MAX_ITEMS = 100
 KST = timezone(timedelta(hours=9))
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s")
 
-# ---------------- 유틸
+# ---------------- 유틸리티 함수들
 def kst_now() -> datetime:
     return datetime.now(KST)
 
@@ -96,7 +96,7 @@ def _oy_key(it: Dict) -> str:
 def _link(name: str, url: Optional[str]) -> str:
     return f"<{url}|{_slack_escape(name)}>" if url else _slack_escape(name)
 
-# ---------------- 파싱
+# ---------------- 파싱 및 정제 로직
 def clean_title(raw: str) -> str:
     if not raw: return ""
     s = raw.strip()
@@ -160,6 +160,7 @@ def parse_html_products(html: str) -> List[Dict]:
         if out: break
     return out
 
+# ---------------- 수집 엔진 코어 후보군
 def try_http_candidates():
     s = make_session()
     cands = [
@@ -179,34 +180,40 @@ def try_http_candidates():
             logging.exception("HTTP candidate error: %s", e)
     return None, None
 
-# [신규 추가] 100% 치트키: Scraper API 연동 모듈
+# [★수정 핵심★] Scraper API 클라우드플레어 우회 모듈
 def try_scraper_api_fetch(url="https://www.oliveyoung.co.kr/store/main/getBestList.do"):
     if not SCRAPER_API_KEY:
-        logging.warning("SCRAPER_API_KEY 환경변수가 없어 스크래퍼 API 모드를 건너뜁니다.")
+        logging.warning("SCRAPER_API_KEY 환경변수가 없어 스크래퍼 모드를 건너뜁니다.")
         return None, None
     try:
-        logging.info("Scraper API 경유 수집 시작...")
-        # 한국 타깃 사이트이므로 한국 주거용/통신사 IP 프록시 라우팅 옵션 포함
+        logging.info("Scraper API 경유 우회 수집 시작...")
+        
+        # Scraper API 전용 파라미터 셋업 (한국 IP를 경유해 차단 확률 최소화)
         params = {
-            "api_key": SCRAPER_API_KEY,
-            "url": url,
-            "country_code": "kr"
+            'api_key': SCRAPER_API_KEY,
+            'url': url,
+            'country_code': 'kr'
         }
-        r = requests.get("http://api.scraperapi.com", params=params, timeout=45)
+        
+        # Requests 기본 내장 인코더를 활용해 엔드포인트 호출 (타임아웃 60초)
+        r = requests.get('http://api.scraperapi.com', params=params, timeout=60)
         logging.info("Scraper API 응답 상태 코드: %s", r.status_code)
+        
         if r.status_code == 200:
             items = parse_html_products(r.text)
             if items:
                 logging.info("Scraper API를 통해 %d개의 상품 수집 성공!", len(items))
                 return items, r.text[:800]
+            else:
+                logging.warning("Scraper API 호출은 정상이나 데이터 파싱에 실패함.")
     except Exception as e:
-        logging.exception("Scraper API 요청 실패: %s", e)
+        logging.exception("Scraper API 요청 중 예외 에러 발생: %s", e)
     return None, None
 
 def try_scrapling_render(url="https://www.oliveyoung.co.kr/store/main/getBestList.do"):
     if not SCRAPLING_AVAILABLE: return None, None
     try:
-        logging.info("Scrapling 폴백 구동: %s", url)
+        logging.info("Scrapling 폴백 백업 엔진 구동: %s", url)
         page = StealthyFetcher.fetch(url, solve_cloudflare=True, timeout=60000)
         html = page.text
         if not html: return None, None
@@ -223,7 +230,7 @@ def fill_ranks_and_fix(items: List[Dict]) -> List[Dict]:
         if r>MAX_ITEMS: break
     return out
 
-# ---------------- Google Drive & Slack (기존과 완전히 동일)
+# ---------------- Google Drive & Slack 동기화 로직
 def build_drive_service_oauth():
     if not (GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET and GOOGLE_REFRESH_TOKEN): return None
     try:
@@ -344,65 +351,79 @@ def build_slack_message_kor(date_str: str, today_items: List[Dict], prev_items: 
 
     return "\n".join([f"*올리브영 데일리 전체 랭킹 Top 100* ({date_str})","", "*TOP 10*", *top10_lines, "", "*🔥 급상승*", *ups_lines, "", "*🆕 뉴랭커*", *newcomer_lines, "", "*📉 급하락*", *drop_lines, *out_lines, "", "*↔ 랭크 인&아웃*", f"{inout_count}개의 제품이 인&아웃 되었습니다."])
 
-# ---------------- 메인 제어 흐름
+# ---------------- 메인 제어 오케스트레이션
 def main() -> int:
-    now=kst_now()
-    today=now.date(); yday=(now - timedelta(days=1)).date()
-    logging.info("Build: OY KR %s", today.isoformat())
+    now = kst_now()
+    today = now.date()
+    yday = (now - timedelta(days=1)).date()
+    logging.info("Build Start: OY KR 랭킹 수집 파이프라인 %s", today.isoformat())
 
-    # 1단계: 기본 HTTP API 호출 시도
-    items,_ = try_http_candidates()
+    # 1단계: 생짜 HTTP 패킷 전송 시도
+    items, _ = try_http_candidates()
     
-    # 2단계: 실패 시 [Scraper API]를 1순위 우회 솔루션으로 작동 (치트키)
+    # 2단계: 실패 시 우회 솔루션 1순위 [Scraper API] 엔진 구동
     if not items:
-        logging.info("기본 HTTP 실패 → 1순위 우회책: Scraper API 가동")
-        items,_ = try_scraper_api_fetch()
+        logging.info("기본 HTTP 실패 → 1순위 우회전략: Scraper API 우회 작동")
+        items, _ = try_scraper_api_fetch()
         
-    # 3단계: Scraper API도 실패할 경우를 대비한 최후의 보루 (Scrapling 모드)
+    # 3단계: Scraper API가 토큰 만료 등으로 막힐 때를 대비한 2순위 안티봇 브라우저 솔루션 (Scrapling 모드)
     if not items:
-        logging.info("Scraper API 실패 → 2순위 우회책: Scrapling 안티봇 모드 가동")
-        items,_ = try_scrapling_render()
+        logging.info("Scraper API 수집 불가 → 2순위 백업 전략: Scrapling 안티봇 엔진 가동")
+        items, _ = try_scrapling_render()
         
     if not items:
-        send_slack_text("❌ 올리브영 국내 수집 실패 (스크래퍼 API 및 모든 우회 수단 차단)")
+        send_slack_text("❌ 올리브영 국내 데이터 수집 실패 (모든 우회 프록시 엔진 차단됨)")
         return 1
         
     items = fill_ranks_and_fix(items[:MAX_ITEMS])
 
-    # 로컬 CSV 생성
+    # 로컬 저장용 CSV 변환 로직
     os.makedirs(OUT_DIR, exist_ok=True)
-    fname_today=f"올리브영_랭킹_{today.isoformat()}.csv"
-    header=["rank","brand","name","original_price","sale_price","discount_pct","url","raw_name"]
+    fname_today = f"올리브영_랭킹_{today.isoformat()}.csv"
+    header = ["rank","brand","name","original_price","sale_price","discount_pct","url","raw_name"]
     def q(s):
         if s is None: return ""
-        s=str(s).replace('"','""')
+        s = str(s).replace('"', '""')
         return f'"{s}"' if any(c in s for c in [',','\n','"']) else s
-    rows=[",".join(header)]
+        
+    rows = [",".join(header)]
     for it in items:
-        rows.append(",".join([q(it.get("rank")), q(it.get("brand")), q(it.get("name")), q(it.get("original_price") if it.get("original_price") is not None else ""), q(it.get("sale_price") if it.get("sale_price") is not None else ""), q(it.get("discount_pct") if it.get("discount_pct") is not None else ""), q(it.get("url")), q(it.get("raw_name"))]))
-    csv_bytes=("\n".join(rows)).encode("utf-8")
-    with open(os.path.join(OUT_DIR, fname_today), "wb") as f: f.write(csv_bytes)
+        rows.append(",".join([
+            q(it.get("rank")), q(it.get("brand")), q(it.get("name")),
+            q(it.get("original_price") if it.get("original_price") is not None else ""),
+            q(it.get("sale_price") if it.get("sale_price") is not None else ""),
+            q(it.get("discount_pct") if it.get("discount_pct") is not None else ""),
+            q(it.get("url")), q(it.get("raw_name"))
+        ]))
+    csv_bytes = ("\n".join(rows)).encode("utf-8")
+    with open(os.path.join(OUT_DIR, fname_today), "wb") as f: 
+        f.write(csv_bytes)
 
-    # GDrive 업로드 및 전일 파일 로드 연동
-    service=build_drive_service_oauth()
+    # 구글 드라이브 업로드 및 싱크
+    service = build_drive_service_oauth()
     if service and GDRIVE_FOLDER_ID:
         upload_csv_to_drive(service, csv_bytes, fname_today, folder_id=GDRIVE_FOLDER_ID)
 
     prev_items: List[Dict] = []
     if service and GDRIVE_FOLDER_ID:
-        fname_yday=f"올리브영_랭킹_{yday.isoformat()}.csv"
-        y_file=find_csv_by_exact_name(service, GDRIVE_FOLDER_ID, fname_yday)
+        fname_yday = f"올리브영_랭킹_{yday.isoformat()}.csv"
+        y_file = find_csv_by_exact_name(service, GDRIVE_FOLDER_ID, fname_yday)
         if y_file:
-            txt=download_file_from_drive(service, y_file.get("id"))
+            txt = download_file_from_drive(service, y_file.get("id"))
             if txt:
-                rdr=csv.DictReader(StringIO(txt))
+                rdr = csv.DictReader(StringIO(txt))
                 for r in rdr:
-                    try: prev_items.append({"rank": int(r.get("rank") or 0), "name": r.get("name"), "raw_name": r.get("raw_name"), "brand": r.get("brand"), "url": r.get("url")})
-                    except Exception: continue
+                    try: 
+                        prev_items.append({
+                            "rank": int(r.get("rank") or 0), "name": r.get("name"), 
+                            "raw_name": r.get("raw_name"), "brand": r.get("brand"), "url": r.get("url")
+                        })
+                    except Exception: 
+                        continue
 
-    # 슬랙 전송
+    # 최종 보고서 슬랙 브로드캐스팅
     send_slack_text(build_slack_message_kor(now.strftime("%Y-%m-%d %H:%M KST"), items, prev_items, len(items)))
-    logging.info("Done.")
+    logging.info("수집 파이프라인 프로세스 종료.")
     return 0
 
 if __name__ == "__main__":
