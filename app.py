@@ -429,7 +429,6 @@ def build_slack_message_kor(
     inout_count=len(today_top_keys ^ prev_top_keys)//2
 
     # 메시지
-    header=f"*올리브영 국내 Top 100* ({date_str})"
     header=f"*올리브영 데일리 전체 랭킹 Top 100* ({date_str})"
     lines=[
         header,"",
