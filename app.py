@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# OliveYoung(국내) 랭킹 수집 + GDrive 업로드 + Slack 알림 (ScraperAPI 패치 버전)
+# OliveYoung(국내) 랭킹 수집 + GDrive 업로드 + Slack 알림 (ScraperAPI 전용, 버그 유발 패키지 제거)
 
 import os
 import re
@@ -15,17 +15,6 @@ import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from bs4 import BeautifulSoup
-
-# 안티봇 백업 엔진 Scrapling
-try:
-    from scrapling.fetchers import StealthyFetcher
-    SCRAPLING_AVAILABLE = True
-except ImportError:
-    try:
-        from scrapling.default import StealthyFetcher
-        SCRAPLING_AVAILABLE = True
-    except ImportError:
-        SCRAPLING_AVAILABLE = False
 
 # Google Drive
 from googleapiclient.discovery import build
@@ -160,7 +149,7 @@ def parse_html_products(html: str) -> List[Dict]:
         if out: break
     return out
 
-# ---------------- 수집 엔진 코어 후보군
+# ---------------- 수집 엔진 코어
 def try_http_candidates():
     s = make_session()
     cands = [
@@ -180,7 +169,7 @@ def try_http_candidates():
             logging.exception("HTTP candidate error: %s", e)
     return None, None
 
-# [★수정 핵심★] Scraper API 클라우드플레어 우회 모듈
+# [★메인 치트키★] Scraper API 클라우드플레어 우회 모듈
 def try_scraper_api_fetch(url="https://www.oliveyoung.co.kr/store/main/getBestList.do"):
     if not SCRAPER_API_KEY:
         logging.warning("SCRAPER_API_KEY 환경변수가 없어 스크래퍼 모드를 건너뜁니다.")
@@ -188,14 +177,13 @@ def try_scraper_api_fetch(url="https://www.oliveyoung.co.kr/store/main/getBestLi
     try:
         logging.info("Scraper API 경유 우회 수집 시작...")
         
-        # Scraper API 전용 파라미터 셋업 (한국 IP를 경유해 차단 확률 최소화)
+        # Scraper API 전용 파라미터 (한국 IP 경유)
         params = {
             'api_key': SCRAPER_API_KEY,
             'url': url,
             'country_code': 'kr'
         }
         
-        # Requests 기본 내장 인코더를 활용해 엔드포인트 호출 (타임아웃 60초)
         r = requests.get('http://api.scraperapi.com', params=params, timeout=60)
         logging.info("Scraper API 응답 상태 코드: %s", r.status_code)
         
@@ -209,19 +197,6 @@ def try_scraper_api_fetch(url="https://www.oliveyoung.co.kr/store/main/getBestLi
     except Exception as e:
         logging.exception("Scraper API 요청 중 예외 에러 발생: %s", e)
     return None, None
-
-def try_scrapling_render(url="https://www.oliveyoung.co.kr/store/main/getBestList.do"):
-    if not SCRAPLING_AVAILABLE: return None, None
-    try:
-        logging.info("Scrapling 폴백 백업 엔진 구동: %s", url)
-        page = StealthyFetcher.fetch(url, solve_cloudflare=True, timeout=60000)
-        html = page.text
-        if not html: return None, None
-        items = parse_html_products(html)
-        return items, html[:800]
-    except Exception as e:
-        logging.exception("Scrapling 실패: %s", e)
-        return None, None
 
 def fill_ranks_and_fix(items: List[Dict]) -> List[Dict]:
     out=[]; r=1
@@ -361,18 +336,13 @@ def main() -> int:
     # 1단계: 생짜 HTTP 패킷 전송 시도
     items, _ = try_http_candidates()
     
-    # 2단계: 실패 시 우회 솔루션 1순위 [Scraper API] 엔진 구동
+    # 2단계: 실패 시 우회 솔루션 [Scraper API] 엔진 구동
     if not items:
-        logging.info("기본 HTTP 실패 → 1순위 우회전략: Scraper API 우회 작동")
+        logging.info("기본 HTTP 실패 → 우회전략: Scraper API 우회 작동")
         items, _ = try_scraper_api_fetch()
         
-    # 3단계: Scraper API가 토큰 만료 등으로 막힐 때를 대비한 2순위 안티봇 브라우저 솔루션 (Scrapling 모드)
     if not items:
-        logging.info("Scraper API 수집 불가 → 2순위 백업 전략: Scrapling 안티봇 엔진 가동")
-        items, _ = try_scrapling_render()
-        
-    if not items:
-        send_slack_text("❌ 올리브영 국내 데이터 수집 실패 (모든 우회 프록시 엔진 차단됨)")
+        send_slack_text("❌ 올리브영 국내 데이터 수집 실패 (Scraper API 차단 혹은 키 인증 오류)")
         return 1
         
     items = fill_ranks_and_fix(items[:MAX_ITEMS])
