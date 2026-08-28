@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# OliveYoung(국내) 랭킹 수집 + GDrive 업로드 + Slack 알림 (ScraperAPI 전용, 버그 유발 패키지 제거)
+# OliveYoung(국내) 랭킹 수집 + GDrive 업로드 + Slack 알림 (ScraperAPI 재시도 로직 추가)
 
 import os
 import re
 import csv
 import logging
+import time
 from io import BytesIO, StringIO
 from typing import List, Dict, Optional
 from datetime import datetime, timedelta, timezone
@@ -169,33 +170,54 @@ def try_http_candidates():
             logging.exception("HTTP candidate error: %s", e)
     return None, None
 
-# [★메인 치트키★] Scraper API 클라우드플레어 우회 모듈
+# [★메인 치트키★] Scraper API 클라우드플레어 우회 모듈 (재시도 로직 추가)
 def try_scraper_api_fetch(url="https://www.oliveyoung.co.kr/store/main/getBestList.do"):
     if not SCRAPER_API_KEY:
         logging.warning("SCRAPER_API_KEY 환경변수가 없어 스크래퍼 모드를 건너뜁니다.")
         return None, None
-    try:
-        logging.info("Scraper API 경유 우회 수집 시작...")
         
-        # Scraper API 전용 파라미터 (한국 IP 경유)
-        params = {
-            'api_key': SCRAPER_API_KEY,
-            'url': url,
-            'country_code': 'kr'
-        }
-        
-        r = requests.get('http://api.scraperapi.com', params=params, timeout=60)
-        logging.info("Scraper API 응답 상태 코드: %s", r.status_code)
-        
-        if r.status_code == 200:
-            items = parse_html_products(r.text)
-            if items:
-                logging.info("Scraper API를 통해 %d개의 상품 수집 성공!", len(items))
-                return items, r.text[:800]
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            logging.info("Scraper API 경유 우회 수집 시작 (시도 %d/%d)...", attempt + 1, max_retries)
+            
+            # Scraper API 전용 파라미터 (한국 IP 경유)
+            params = {
+                'api_key': SCRAPER_API_KEY,
+                'url': url,
+                'country_code': 'kr',
+                # 렌더링 옵션을 추가하여 성공률을 높입니다.
+                'render': 'true' 
+            }
+            
+            r = requests.get('http://api.scraperapi.com', params=params, timeout=90)
+            logging.info("Scraper API 응답 상태 코드: %s", r.status_code)
+            
+            if r.status_code == 200:
+                items = parse_html_products(r.text)
+                if items:
+                    logging.info("Scraper API를 통해 %d개의 상품 수집 성공!", len(items))
+                    return items, r.text[:800]
+                else:
+                    logging.warning("Scraper API 호출은 정상이나 데이터 파싱에 실패함.")
+                    break # 파싱 실패는 재시도해도 의미가 없으므로 중단
+            elif r.status_code == 500:
+                logging.warning("Scraper API 서버 오류 (500). 10초 후 재시도합니다...")
+                time.sleep(10)
+                continue
+            elif r.status_code == 403 or r.status_code == 401:
+                logging.error("Scraper API 인증 또는 권한 오류 (%s).", r.status_code)
+                break
             else:
-                logging.warning("Scraper API 호출은 정상이나 데이터 파싱에 실패함.")
-    except Exception as e:
-        logging.exception("Scraper API 요청 중 예외 에러 발생: %s", e)
+                 logging.warning("예상치 못한 응답 코드 (%s). 재시도합니다...", r.status_code)
+                 time.sleep(5)
+                 continue
+
+        except Exception as e:
+            logging.exception("Scraper API 요청 중 예외 에러 발생: %s", e)
+            if attempt < max_retries - 1:
+                time.sleep(10)
+            
     return None, None
 
 def fill_ranks_and_fix(items: List[Dict]) -> List[Dict]:
