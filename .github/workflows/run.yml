@@ -18,6 +18,7 @@ jobs:
       GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
       # 👇 이 줄을 추가하여 등록해 두신 스크래퍼 API 키를 주입합니다.
       SCRAPER_API_KEY:      ${{ secrets.SCRAPER_API_KEY }}
+      SCRAPINGANT_KEY:      ${{ secrets.SCRAPINGANT_KEY }}
 
     steps:
       - name: Checkout
